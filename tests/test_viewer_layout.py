@@ -41,6 +41,11 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertNotIn("confirm(`Move “${item.name}” to the Recycle Bin?`)", JS)
         self.assertIn('$("#deleteBtn").addEventListener("click", () => performAction("delete"))', JS)
 
+    def test_add_folder_uses_only_the_native_folder_picker(self):
+        choose_folder = JS[JS.index("async function chooseFolder()"):JS.index("async function loadMedia")]
+        self.assertIn("await window.pywebview.api.choose_folder()", choose_folder)
+        self.assertNotIn("prompt(", choose_folder)
+
     def test_ctrl_click_selects_multiple_cards_for_group_actions(self):
         self.assertIn("selectedKeys: new Set()", JS)
         self.assertIn("if (event.ctrlKey || event.metaKey)", JS)

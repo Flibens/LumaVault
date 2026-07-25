@@ -196,7 +196,6 @@
     try {
       if (window.pywebview?.api?.choose_folder) path = await window.pywebview.api.choose_folder();
     } catch (_) { path = null; }
-    if (!path) path = prompt("Paste the full path of the folder you want to add:", "C:\\Comfy\\ComfyUI\\output");
     if (!path) return;
     const pieces = path.replace(/[\\/]+$/, "").split(/[\\/]/);
     const name = pieces[pieces.length - 1] || "Media Folder";
