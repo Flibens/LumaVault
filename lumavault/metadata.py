@@ -647,9 +647,35 @@ def parse_comfy_metadata(metadata):
                 # Extract LoRAs from LoRA Manager, standard loaders, stackers, and custom loaders.
                 if any(kw in node_type_l for kw in ['lora', 'loraloader', 'lora stacker', 'lora_stack']):
                     try:
-                        if widgets and isinstance(widgets[0], list):
-                            for lora_obj in widgets[0]:
-                                if isinstance(lora_obj, dict) and lora_obj.get('active', True):
+                        # LoraManager stores a human-readable string containing every
+                        # inventory entry in widget 0 and the authoritative structured
+                        # list (including each entry's active flag) in a later widget.
+                        # Never treat that display string as one giant LoRA name.
+                        structured_loras = next(
+                            (
+                                value for value in widgets
+                                if isinstance(value, list)
+                                and value
+                                and all(isinstance(item, dict) and 'name' in item for item in value)
+                            ),
+                            None,
+                        )
+                        if structured_loras is None:
+                            if widgets and isinstance(widgets[0], list) and not widgets[0]:
+                                # Preserve the original empty-list convention used by
+                                # stackers that put their structured data in widget 0.
+                                structured_loras = widgets[0]
+                            elif 'loramanager' in node_type_l:
+                                # An empty later list is authoritative only for
+                                # LoraManager. Other loaders can have unrelated empty
+                                # list widgets after their normal name/strength fields.
+                                structured_loras = next(
+                                    (value for value in widgets if isinstance(value, list) and not value),
+                                    None,
+                                )
+                        if structured_loras is not None:
+                            for lora_obj in structured_loras:
+                                if lora_obj.get('active', True):
                                     _add_lora(
                                         parsed,
                                         lora_obj.get('name'),

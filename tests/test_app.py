@@ -89,6 +89,50 @@ class LumaVaultAppTests(unittest.TestCase):
         self.assertEqual(reloaded.data["settings"]["ui_scale"], 1.75)
         self.assertEqual(self.client.patch("/api/settings", json={"ui_scale": "huge"}).status_code, 400)
 
+    def test_lora_manager_structured_widget_excludes_inactive_inventory(self):
+        metadata = {
+            "workflow": {
+                "nodes": [{
+                    "id": 61,
+                    "type": "Lora Stacker (LoraManager)",
+                    "mode": 0,
+                    "widgets_values": [
+                        "<lora:active_style:0.80> <lora:unused_style:1.00>",
+                        [],
+                        [
+                            {"name": "active_style", "strength": 0.8, "clipStrength": 0.6, "active": True},
+                            {"name": "unused_style", "strength": 1.0, "clipStrength": 1.0, "active": False},
+                        ],
+                    ],
+                }],
+            },
+        }
+        parsed = parse_comfy_metadata(metadata)
+        self.assertEqual(parsed["loras"], [{
+            "name": "active_style",
+            "strength_model": 0.8,
+            "strength_clip": 0.6,
+        }])
+
+    def test_standard_lora_loader_ignores_unrelated_empty_widget(self):
+        metadata = {
+            "workflow": {
+                "nodes": [{
+                    "id": 8,
+                    "type": "LoraLoader",
+                    "mode": 0,
+                    "inputs": [],
+                    "widgets_values": ["style.safetensors", 0.8, 0.6, []],
+                }],
+            },
+        }
+        parsed = parse_comfy_metadata(metadata)
+        self.assertEqual(parsed["loras"], [{
+            "name": "style.safetensors",
+            "strength_model": 0.8,
+            "strength_clip": 0.6,
+        }])
+
     def test_split_sampler_nodes_and_generation_model_priority(self):
         graph = {
             "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "pixel-dit.safetensors"}},
