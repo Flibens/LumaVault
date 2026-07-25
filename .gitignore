@@ -1,0 +1,23 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Build artifacts
+build/
+dist/
+*.spec
+*.zip
+
+# Local QA and runtime data
+qa-data/
+qa-media/
+state.json
+thumbnails/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

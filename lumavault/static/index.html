@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <link rel="icon" type="image/png" href="/static/favicon.png">
+  <title>LumaVault</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark"><span></span><span></span><span></span></div>
+        <div><strong>LumaVault</strong><small>Creative archive</small></div>
+      </div>
+
+      <nav class="side-nav">
+        <button class="nav-item active" data-view="library" id="libraryViewBtn"><span data-icon="grid"></span><span>Library</span></button>
+        <button class="nav-item" data-view="favorites" id="favoritesViewBtn"><span data-icon="star"></span><span>Favorites</span><b id="favoriteCount">0</b></button>
+      </nav>
+
+      <div class="side-section-head">
+        <span>Sources</span>
+        <button class="icon-button quiet" id="manageSourcesBtn" title="Settings"><span data-icon="settings"></span></button>
+      </div>
+      <div class="source-list" id="sourceList"></div>
+      <button class="add-source" id="addSourceBtn"><span data-icon="plus"></span><span>Add folder</span></button>
+
+      <div class="sidebar-footer">
+        <div class="status-dot"></div>
+        <div><span>Standalone</span><small>No ComfyUI process required</small></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-button mobile-menu" id="mobileMenuBtn"><span data-icon="menu"></span></button>
+        <div class="title-block">
+          <h1 id="viewTitle">Library</h1>
+          <p id="viewSubtitle">Your generated work, in one place.</p>
+        </div>
+        <div class="search-box">
+          <span data-icon="search"></span>
+          <input id="searchInput" type="search" placeholder="Search files" autocomplete="off">
+          <kbd>Ctrl K</kbd>
+        </div>
+        <div class="top-actions">
+          <button class="icon-button" id="refreshBtn" title="Refresh"><span data-icon="refresh"></span></button>
+          <button class="button subtle" id="compareModeBtn"><span data-icon="compare"></span><span>Compare</span></button>
+        </div>
+      </header>
+
+      <section class="filterbar">
+        <div class="segmented" id="kindFilter">
+          <button class="active" data-kind="all">All</button>
+          <button data-kind="image">Images</button>
+          <button data-kind="video">Video</button>
+          <button data-kind="audio">Audio</button>
+        </div>
+        <div class="filter-spacer"></div>
+        <div class="range-wrap" title="Thumbnail size">
+          <span data-icon="grid-small"></span>
+          <input type="range" id="cardSize" min="190" max="380" value="260">
+          <span data-icon="grid"></span>
+        </div>
+        <select id="sortSelect" aria-label="Sort media">
+          <option value="date_desc">Newest first</option>
+          <option value="date_asc">Oldest first</option>
+          <option value="name_asc">Name A–Z</option>
+          <option value="name_desc">Name Z–A</option>
+          <option value="size_desc">Largest first</option>
+        </select>
+      </section>
+
+      <section class="content">
+        <div class="summary-row">
+          <span id="resultCount">Loading media…</span>
+          <span id="activeSourceLabel">All sources</span>
+        </div>
+        <div class="gallery" id="gallery"></div>
+        <div class="empty-state hidden" id="emptyState">
+          <div class="empty-orbit"><span data-icon="image"></span></div>
+          <h2>Nothing here yet</h2>
+          <p>Add a folder or adjust your filters to reveal your work.</p>
+          <button class="button primary" id="emptyAddBtn"><span data-icon="plus"></span>Add folder</button>
+        </div>
+        <div class="load-more hidden" id="loadMore"><div class="spinner"></div><span>Loading more</span></div>
+      </section>
+    </main>
+  </div>
+
+  <div class="selection-dock hidden" id="selectionDock">
+    <div><span class="selection-count" id="selectionCount">0</span><span>selected for comparison</span></div>
+    <button class="button subtle" id="clearCompareBtn">Clear</button>
+    <button class="button primary" id="openCompareBtn" disabled><span data-icon="compare"></span>Compare now</button>
+  </div>
+
+  <div class="viewer hidden" id="viewer" role="dialog" aria-modal="true">
+    <div class="viewer-stage" id="viewerStage">
+      <div class="viewer-top">
+        <div class="viewer-file"><span id="viewerKindBadge">IMAGE</span><strong id="viewerName"></strong></div>
+        <div class="viewer-stage-actions">
+          <button class="glass-button" id="zoomOutBtn" title="Zoom out"><span data-icon="minus"></span></button>
+          <button class="glass-button zoom-label" id="zoomResetBtn">100%</button>
+          <button class="glass-button" id="zoomInBtn" title="Zoom in"><span data-icon="plus"></span></button>
+          <button class="glass-button" id="closeViewerBtn" title="Close"><span data-icon="close"></span></button>
+        </div>
+      </div>
+      <button class="viewer-nav prev" id="viewerPrev"><span data-icon="chevron-left"></span></button>
+      <div class="media-canvas" id="mediaCanvas"></div>
+      <button class="viewer-nav next" id="viewerNext"><span data-icon="chevron-right"></span></button>
+      <div class="viewer-bottom-hint">Scroll to zoom · drag to pan · arrow keys to navigate</div>
+    </div>
+    <aside class="inspector">
+      <div class="inspector-head">
+        <div class="inspector-actions">
+          <button class="button subtle grow" id="viewerFavoriteBtn"><span data-icon="star"></span><span>Favorite</span></button>
+          <button class="icon-button" id="revealBtn" title="Show in Explorer"><span data-icon="folder-open"></span></button>
+          <button class="icon-button" id="openExternalBtn" title="Open externally"><span data-icon="external"></span></button>
+          <button class="icon-button danger" id="deleteBtn" title="Move to Recycle Bin"><span data-icon="trash"></span></button>
+        </div>
+        <div class="tabs">
+          <button class="active" data-tab="details">Details</button>
+          <button data-tab="workflow">Workflow</button>
+          <button data-tab="raw">Raw</button>
+        </div>
+      </div>
+      <div class="inspector-body">
+        <div class="tab-panel active" data-panel="details" id="detailsPanel"></div>
+        <div class="tab-panel" data-panel="workflow" id="workflowPanel"></div>
+        <div class="tab-panel" data-panel="raw" id="rawPanel"></div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="compare-overlay hidden" id="compareOverlay" role="dialog" aria-modal="true">
+    <header class="compare-head">
+      <div><span class="eyebrow">A / B COMPARISON</span><strong id="compareTitle">Compare</strong></div>
+      <button class="glass-button" id="closeCompareOverlay"><span data-icon="close"></span></button>
+    </header>
+    <div class="compare-stage" id="compareStage">
+      <img class="compare-back" id="compareBack" alt="Comparison B">
+      <div class="compare-front-wrap" id="compareFrontWrap"><img class="compare-front" id="compareFront" alt="Comparison A"></div>
+      <div class="compare-divider" id="compareDivider"><span><i></i><i></i></span></div>
+      <div class="compare-label label-a" id="compareLabelA">A</div>
+      <div class="compare-label label-b" id="compareLabelB">B</div>
+    </div>
+  </div>
+
+  <div class="modal-shell hidden" id="sourcesModal" role="dialog" aria-modal="true">
+    <div class="modal-card sources-card">
+      <div class="modal-card-head"><div><span class="eyebrow">LUMAVAULT SETTINGS</span><h2>Settings</h2></div><button class="icon-button" id="closeSourcesBtn"><span data-icon="close"></span></button></div>
+      <section class="appearance-setting">
+        <div class="setting-copy"><strong>Interface size</strong><span>Scale text, buttons, menus, and metadata for your display. Media zoom remains separate.</span></div>
+        <output id="uiScaleValue" for="uiScale">100%</output>
+        <input type="range" id="uiScale" min="80" max="200" step="5" value="100" aria-label="Interface size">
+        <div class="scale-presets" aria-label="Interface size presets">
+          <button data-ui-scale="1">100%</button>
+          <button data-ui-scale="1.25">125%</button>
+          <button data-ui-scale="1.5">150%</button>
+          <button data-ui-scale="1.75">175%</button>
+        </div>
+      </section>
+      <div class="settings-section-label">Source folders</div>
+      <p class="modal-description">LumaVault watches these folders directly. ComfyUI can be completely closed.</p>
+      <div class="sources-manager-list" id="sourcesManagerList"></div>
+      <div class="modal-card-foot"><span id="dataLocation"></span><button class="button primary" id="modalAddSourceBtn"><span data-icon="plus"></span>Add folder</button></div>
+    </div>
+  </div>
+
+  <div class="context-menu hidden" id="contextMenu"></div>
+  <div class="toast-stack" id="toastStack"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
