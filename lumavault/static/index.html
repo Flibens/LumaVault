@@ -120,15 +120,18 @@
           <button class="icon-button" id="revealBtn" title="Show in Explorer"><span data-icon="folder-open"></span></button>
           <button class="icon-button" id="openExternalBtn" title="Open externally"><span data-icon="external"></span></button>
           <button class="icon-button danger" id="deleteBtn" title="Move to Recycle Bin"><span data-icon="trash"></span></button>
+          <button class="icon-button workflow-close" id="workflowCloseBtn" title="Close workflow"><span data-icon="close"></span></button>
         </div>
         <div class="tabs">
           <button class="active" data-tab="details">Details</button>
+          <button data-tab="nodes">Nodes</button>
           <button data-tab="workflow">Workflow</button>
           <button data-tab="raw">Raw</button>
         </div>
       </div>
       <div class="inspector-body">
         <div class="tab-panel active" data-panel="details" id="detailsPanel"></div>
+        <div class="tab-panel" data-panel="nodes" id="nodesPanel"></div>
         <div class="tab-panel" data-panel="workflow" id="workflowPanel"></div>
         <div class="tab-panel" data-panel="raw" id="rawPanel"></div>
       </div>

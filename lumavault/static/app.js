@@ -31,6 +31,9 @@
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"})[ch]);
   const icon = (name) => icons[name] || "";
   const UI_SCALE_KEY = "lumavault-ui-scale";
+  const WORKFLOW_DOM_BUDGET = 20000;
+  const NODE_LIST_DOM_BUDGET = 20000;
+  const NODE_LIST_MAX_CARDS = 2000;
   let uiScaleSaveTimer = null;
 
   $$('[data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); });
@@ -40,7 +43,7 @@
     search: "", sort: "date_desc", kind: "all", favorites: false,
     items: [], total: 0, compareMode: false, compareItems: [], selectedKeys: new Set(),
     viewerIndex: -1, metadata: null, dataDir: "", zoom: 1, panX: 0, panY: 0,
-    panning: false, panStart: null, requestToken: 0, uiScale: 1
+    panning: false, panStart: null, requestToken: 0, uiScale: 1, workflowView: null
   };
 
   const gallery = $("#gallery");
@@ -464,6 +467,7 @@
     favorite.innerHTML = `${icon("star")}<span>${item.is_favorite ? "Favorited" : "Favorite"}</span>`;
     renderViewerMedia(item);
     $("#detailsPanel").innerHTML = '<div class="inspector-loading"><div><div class="spinner"></div><p>Reading metadata</p></div></div>';
+    $("#nodesPanel").innerHTML = '<div class="inspector-loading">Reading workflow nodes</div>';
     $("#workflowPanel").innerHTML = '<div class="inspector-loading">Reading workflow</div>';
     $("#rawPanel").innerHTML = '<div class="inspector-loading">Reading embedded data</div>';
     setInspectorTab("details");
@@ -474,6 +478,7 @@
       renderMetadata(data, item);
     } catch (error) {
       $("#detailsPanel").innerHTML = `<p class="muted-copy">Metadata could not be read: ${escapeHtml(error.message)}</p>`;
+      $("#nodesPanel").innerHTML = '<p class="muted-copy">No workflow nodes available.</p>';
       $("#workflowPanel").innerHTML = '<p class="muted-copy">No workflow data available.</p>';
       $("#rawPanel").innerHTML = '<p class="muted-copy">No raw metadata available.</p>';
     }
@@ -508,7 +513,7 @@
         ${parsed.negative_prompt ? `<div class="meta-section-title"><span>Negative</span><button data-copy-prompt="negative">Copy negative</button></div><div class="prompt-box negative">${escapeHtml(parsed.negative_prompt)}</div>` : ""}
       </section>` : '<section class="meta-section"><div class="meta-section-title"><span>Prompts</span></div><p class="muted-copy">No prompt text was found in this file.</p></section>';
     const loras = Array.isArray(parsed.loras) && parsed.loras.length
-      ? parsed.loras.map(lora => `<div class="lora-chip"><strong>${escapeHtml(lora.name)}</strong><span>MODEL ${escapeHtml(lora.strength_model)} · CLIP ${escapeHtml(lora.strength_clip)}</span></div>`).join("")
+      ? parsed.loras.slice(0, 128).map(lora => `<div class="lora-chip"><strong>${escapeHtml(lora.name)}</strong><span>MODEL ${escapeHtml(lora.strength_model)} · CLIP ${escapeHtml(lora.strength_clip)}</span></div>`).join("")
       : '<p class="muted-copy">No LoRAs detected.</p>';
     const size = dimensions.width && dimensions.height ? `${dimensions.width} × ${dimensions.height}` : (parsed.width && parsed.height ? `${parsed.width} × ${parsed.height}` : null);
     $("#detailsPanel").innerHTML = `
@@ -522,28 +527,304 @@
       </div></section>`;
     $$('[data-copy-prompt]', $("#detailsPanel")).forEach(button => button.addEventListener("click", () => copyText(button.dataset.copyPrompt === "negative" ? parsed.negative_prompt : parsed.prompt, "Prompt copied")));
     $('[data-copy-path]', $("#detailsPanel"))?.addEventListener("click", () => copyText(file.path, "Path copied"));
-    renderWorkflow(data.workflow_nodes || []);
+    renderNodeList(data.workflow_nodes || []);
+    renderWorkflow(data.workflow_graph);
     $("#rawPanel").innerHTML = `<section class="meta-section"><div class="meta-section-title"><span>Embedded metadata</span><button id="copyRawBtn">Copy JSON</button></div><pre class="raw-box">${escapeHtml(JSON.stringify(data.raw || {}, null, 2))}</pre></section>`;
     $("#copyRawBtn")?.addEventListener("click", () => copyText(JSON.stringify(data.raw || {}, null, 2), "Raw metadata copied"));
   }
 
-  function renderWorkflow(nodes) {
-    const panel = $("#workflowPanel");
+  function renderNodeList(nodes) {
+    const panel = $("#nodesPanel");
     if (!Array.isArray(nodes) || !nodes.length) {
       panel.innerHTML = '<p class="muted-copy">No ComfyUI workflow nodes were found in this file.</p>';
       return;
     }
-    panel.innerHTML = `<div class="workflow-search"><input id="workflowSearch" placeholder="Filter ${nodes.length} workflow nodes"></div><div id="workflowNodes"></div>`;
+    panel.innerHTML = `<div class="workflow-search"><input id="workflowNodeSearch" placeholder="Filter ${nodes.length} workflow nodes"></div><div id="workflowNodeList"></div>`;
     const render = (filter = "") => {
       const term = filter.trim().toLowerCase();
       const visible = nodes.filter(node => !term || `${node.type} ${node.id} ${JSON.stringify(node.params)}`.toLowerCase().includes(term));
-      $("#workflowNodes").innerHTML = visible.map((node, index) => `
-        <article class="node-card"><button class="node-head"><span class="node-index">${index + 1}</span><span class="node-head-copy"><strong>${escapeHtml(node.type || "Unknown")}</strong><small>NODE ${escapeHtml(node.id || "N/A")} · ${(node.params || []).length} PARAMS</small></span>${icon("chevron-right")}</button>
-          <ul class="node-params">${(node.params || []).map(param => `<li><b>${escapeHtml(param.name)}</b><span>${escapeHtml(param.value)}</span></li>`).join("") || "<li><span>No parameters</span></li>"}</ul></article>`).join("") || '<p class="muted-copy">No nodes match that filter.</p>';
-      $$(".node-head", $("#workflowNodes")).forEach(button => button.addEventListener("click", () => button.closest(".node-card").classList.toggle("open")));
+      const renderedNodes = visible.slice(0, NODE_LIST_MAX_CARDS);
+      let remainingNodeListRecords = Math.max(0, NODE_LIST_DOM_BUDGET - renderedNodes.length);
+      const cards = renderedNodes.map((node, index) => {
+        const sourceParams = Array.isArray(node.params) ? node.params : [];
+        const params = sourceParams.slice(0, remainingNodeListRecords);
+        remainingNodeListRecords = Math.max(0, remainingNodeListRecords - params.length);
+        let paramMarkup = params.map(param => `<li><b>${escapeHtml(param.name)}</b><span>${escapeHtml(param.value)}</span></li>`).join("");
+        if (!sourceParams.length && remainingNodeListRecords > 0) {
+          paramMarkup = "<li><span>No parameters</span></li>";
+          remainingNodeListRecords -= 1;
+        }
+        return `<article class="node-card"><button class="node-head"><span class="node-index">${index + 1}</span><span class="node-head-copy"><strong>${escapeHtml(node.type || "Unknown")}</strong><small>NODE ${escapeHtml(node.id || "N/A")} · ${sourceParams.length} PARAMS</small></span>${icon("chevron-right")}</button>
+          <ul class="node-params">${paramMarkup}</ul></article>`;
+      }).join("");
+      const limited = visible.length > renderedNodes.length ? `<p class="muted-copy">Showing ${renderedNodes.length} of ${visible.length} matching nodes. Refine the filter to see others.</p>` : "";
+      $("#workflowNodeList").innerHTML = cards ? `${limited}${cards}` : '<p class="muted-copy">No nodes match that filter.</p>';
+      $$(".node-head", $("#workflowNodeList")).forEach(button => button.addEventListener("click", () => button.closest(".node-card").classList.toggle("open")));
     };
     render();
-    $("#workflowSearch").addEventListener("input", event => render(event.target.value));
+    $("#workflowNodeSearch").addEventListener("input", event => render(event.target.value));
+  }
+
+  function workflowPortColor(type) {
+    const value = String(type || "").toUpperCase();
+    if (value.includes("MODEL")) return "#b985ff";
+    if (value.includes("CLIP")) return "#f1c75b";
+    if (value.includes("CONDITION")) return "#f28b68";
+    if (value.includes("LATENT")) return "#ff78b7";
+    if (value.includes("IMAGE")) return "#61d5e8";
+    if (value.includes("MASK")) return "#79d69f";
+    if (value.includes("VAE")) return "#ef8fbd";
+    return "#8d89ff";
+  }
+
+  function workflowNodeAccent(type) {
+    const value = String(type || "").toLowerCase();
+    if (value.includes("sampler")) return "#7772ff";
+    if (value.includes("loader") || value.includes("checkpoint")) return "#b985ff";
+    if (value.includes("text") || value.includes("prompt") || value.includes("clip")) return "#e69a65";
+    if (value.includes("image") || value.includes("latent") || value.includes("vae")) return "#48bfd3";
+    return "#7772ff";
+  }
+
+  function workflowParamHeight(params) {
+    if (!params.length) return 0;
+    return 14 + params.reduce((height, param) => height + (param.multiline ? 104 : 22), 0);
+  }
+
+  function applyWorkflowTransform() {
+    const view = state.workflowView;
+    if (!view?.scene) return;
+    view.scene.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.scale})`;
+    const label = $("#workflowZoomValue");
+    if (label) label.textContent = `${Math.round(view.scale * 100)}%`;
+  }
+
+  function fitWorkflowGraph() {
+    const view = state.workflowView;
+    if (!view?.canvas?.clientWidth || !view.canvas.clientHeight) return;
+    const padding = 54;
+    const availableWidth = Math.max(1, view.canvas.clientWidth - padding * 2);
+    const availableHeight = Math.max(1, view.canvas.clientHeight - padding * 2);
+    const fittedScale = Math.min(1.2, availableWidth / view.width, availableHeight / view.height);
+    view.scale = Number.isFinite(fittedScale) && fittedScale > 0 ? fittedScale : 1;
+    view.x = (view.canvas.clientWidth - view.width * view.scale) / 2;
+    view.y = (view.canvas.clientHeight - view.height * view.scale) / 2;
+    applyWorkflowTransform();
+  }
+
+  function zoomWorkflow(factor, clientX = null, clientY = null) {
+    const view = state.workflowView;
+    if (!view?.canvas) return;
+    const rect = view.canvas.getBoundingClientRect();
+    const pointX = clientX === null ? rect.width / 2 : clientX - rect.left;
+    const pointY = clientY === null ? rect.height / 2 : clientY - rect.top;
+    const worldX = (pointX - view.x) / view.scale;
+    const worldY = (pointY - view.y) / view.scale;
+    const next = Math.min(2.5, view.scale * factor);
+    if (!Number.isFinite(next) || next <= 0) return;
+    view.x = pointX - worldX * next;
+    view.y = pointY - worldY * next;
+    view.scale = next;
+    applyWorkflowTransform();
+  }
+
+  function renderWorkflow(graph) {
+    const panel = $("#workflowPanel");
+    const sourceNodes = Array.isArray(graph?.nodes) ? graph.nodes.slice(0, 5000) : [];
+    if (!sourceNodes.length) {
+      state.workflowView = null;
+      panel.innerHTML = '<div class="workflow-empty"><div class="workflow-empty-mark">◇</div><strong>No visual workflow found</strong><span>This file does not contain a ComfyUI workflow graph.</span></div>';
+      return;
+    }
+
+    const sourceLinks = Array.isArray(graph?.links) ? graph.links.slice(0, 20000) : [];
+    const requiredInputSlots = new Map();
+    const requiredOutputSlots = new Map();
+    const requireSlot = (mapping, nodeId, slot) => {
+      if (!Number.isInteger(slot) || slot < 0 || slot >= 512) return;
+      const key = String(nodeId);
+      if (!mapping.has(key)) mapping.set(key, new Set());
+      mapping.get(key).add(slot);
+    };
+    sourceLinks.forEach(link => {
+      requireSlot(requiredOutputSlots, link.from_node, Number(link.from_slot || 0));
+      requireSlot(requiredInputSlots, link.to_node, Number(link.to_slot || 0));
+    });
+
+    let remainingWorkflowDomRecords = Math.max(0, WORKFLOW_DOM_BUDGET - sourceNodes.length);
+    const prepared = sourceNodes.map((node, index) => {
+      const params = Array.isArray(node.params) ? node.params.slice(0, Math.min(7, remainingWorkflowDomRecords)) : [];
+      remainingWorkflowDomRecords = Math.max(0, remainingWorkflowDomRecords - params.length);
+      const parameterHeight = workflowParamHeight(params);
+      const rawInputs = Array.isArray(node.inputs) ? node.inputs.slice(0, 512) : [];
+      const rawOutputs = Array.isArray(node.outputs) ? node.outputs.slice(0, 512) : [];
+      const inputRequired = [...(requiredInputSlots.get(String(node.id)) || [])].filter(slot => slot < rawInputs.length).sort((a, b) => a - b);
+      const outputRequired = [...(requiredOutputSlots.get(String(node.id)) || [])].filter(slot => slot < rawOutputs.length).sort((a, b) => a - b);
+      const targetRows = Math.max(0, remainingWorkflowDomRecords);
+      const compactPorts = (ports, required) => {
+        const indices = required.slice(0, targetRows);
+        const chosen = new Set(indices);
+        for (let slot = 0; slot < ports.length && indices.length < targetRows; slot += 1) {
+          if (!chosen.has(slot)) indices.push(slot);
+        }
+        return indices.map(slot => ({ ...ports[slot], originalSlot: slot }));
+      };
+      const inputs = compactPorts(rawInputs, inputRequired);
+      const outputs = compactPorts(rawOutputs, outputRequired);
+      remainingWorkflowDomRecords = Math.max(0, remainingWorkflowDomRecords - Math.max(inputs.length, outputs.length));
+      const savedWidth = Number(node.size?.[0]) || 240;
+      const savedHeight = Number(node.size?.[1]) || 140;
+      const savedX = Number(node.position?.[0]);
+      const savedY = Number(node.position?.[1]);
+      const contentHeight = 48 + Math.max(inputs.length, outputs.length) * 22 + parameterHeight;
+      return {
+        ...node,
+        x: Number.isFinite(savedX) ? savedX : index % 4 * 320,
+        y: Number.isFinite(savedY) ? savedY : Math.floor(index / 4) * 240,
+        width: Math.max(210, Math.min(420, savedWidth)),
+        height: Math.max(92, Math.min(12000, Math.max(savedHeight, contentHeight))),
+        inputs, outputs, params,
+        inputRowBySlot: new Map(inputs.map((port, row) => [port.originalSlot, row])),
+        outputRowBySlot: new Map(outputs.map((port, row) => [port.originalSlot, row]))
+      };
+    });
+    const preparedGroups = (Array.isArray(graph?.groups) ? graph.groups.slice(0, 128) : []).map(group => {
+      const x = Number(group.position?.[0]);
+      const y = Number(group.position?.[1]);
+      const width = Number(group.size?.[0]);
+      const height = Number(group.size?.[1]);
+      return {
+        ...group,
+        x: Number.isFinite(x) ? x : 0,
+        y: Number.isFinite(y) ? y : 0,
+        width: Number.isFinite(width) && width > 0 ? width : 320,
+        height: Number.isFinite(height) && height > 0 ? height : 220
+      };
+    });
+    let minX = Infinity;
+    let minY = Infinity;
+    for (const item of [...prepared, ...preparedGroups]) {
+      minX = Math.min(minX, item.x);
+      minY = Math.min(minY, item.y);
+    }
+    prepared.forEach(node => { node.x = node.x - minX + 74; node.y = node.y - minY + 74; });
+    preparedGroups.forEach(group => { group.x = group.x - minX + 74; group.y = group.y - minY + 74; });
+    let contentWidth = 0;
+    let contentHeight = 0;
+    for (const node of prepared) {
+      contentWidth = Math.max(contentWidth, node.x + node.width);
+      contentHeight = Math.max(contentHeight, node.y + node.height);
+    }
+    for (const group of preparedGroups) {
+      contentWidth = Math.max(contentWidth, group.x + group.width);
+      contentHeight = Math.max(contentHeight, group.y + group.height);
+    }
+    const width = contentWidth + 74;
+    const height = contentHeight + 74;
+    const nodeMap = new Map(prepared.map(node => [String(node.id), node]));
+
+    const renderedLinks = [];
+    for (const link of sourceLinks) {
+      if (remainingWorkflowDomRecords <= 0) break;
+      const from = nodeMap.get(String(link.from_node));
+      const to = nodeMap.get(String(link.to_node));
+      if (!from || !to) continue;
+      const fromSlot = Number(link.from_slot || 0);
+      const toSlot = Number(link.to_slot || 0);
+      const fromRow = from.outputRowBySlot.get(fromSlot);
+      const toRow = to.inputRowBySlot.get(toSlot);
+      if (fromRow === undefined || toRow === undefined) continue;
+      const x1 = from.x + from.width;
+      const y1 = from.y + 48 + fromRow * 22;
+      const x2 = to.x;
+      const y2 = to.y + 48 + toRow * 22;
+      const curve = Math.max(64, Math.abs(x2 - x1) * .48);
+      const color = workflowPortColor(link.type);
+      renderedLinks.push(`<path class="workflow-link" d="M ${x1} ${y1} C ${x1 + curve} ${y1}, ${x2 - curve} ${y2}, ${x2} ${y2}" style="--link-color:${color}"></path>`);
+      remainingWorkflowDomRecords -= 1;
+    }
+    const links = renderedLinks.join("");
+
+    const groupMarkup = preparedGroups.map(group => `<section class="workflow-group" style="left:${group.x}px;top:${group.y}px;width:${group.width}px;height:${group.height}px">
+      <strong>${escapeHtml(group.title || "Subgraph")}</strong><span>SUBGRAPH · ${escapeHtml(group.id || "")}</span>
+    </section>`).join("");
+
+    const nodes = prepared.map(node => {
+      const rowCount = Math.max(node.inputs.length, node.outputs.length);
+      const rows = Array.from({ length: rowCount }, (_, index) => {
+        const input = node.inputs[index];
+        const output = node.outputs[index];
+        return `<div class="workflow-node-row">
+          <span class="workflow-slot input ${input ? "" : "empty"}">${input ? `<i style="--port-color:${workflowPortColor(input.type)}"></i><b title="${escapeHtml(input.name)}">${escapeHtml(input.name)}</b>` : ""}</span>
+          <span class="workflow-slot output ${output ? "" : "empty"}">${output ? `<b title="${escapeHtml(output.name)}">${escapeHtml(output.name)}</b><i style="--port-color:${workflowPortColor(output.type)}"></i>` : ""}</span>
+        </div>`;
+      }).join("");
+      const params = node.params.length ? `<div class="workflow-node-params">${node.params.map(param => `<div class="${param.multiline ? "multiline" : ""}"><b title="${escapeHtml(param.name)}">${escapeHtml(param.name)}</b><span ${param.multiline ? "" : `title="${escapeHtml(param.value)}"`}>${escapeHtml(param.value)}</span></div>`).join("")}</div>` : "";
+      return `<article class="workflow-node ${Number(node.mode) !== 0 ? "muted" : ""}" data-workflow-node="${escapeHtml(node.id)}" style="left:${node.x}px;top:${node.y}px;width:${node.width}px;min-height:${node.height}px;--node-accent:${workflowNodeAccent(node.type)}">
+        <header><span></span><strong title="${escapeHtml(node.title || node.type)}">${escapeHtml(node.title || node.type || "Unknown")}</strong><small>#${escapeHtml(node.id)}</small></header>
+        <div class="workflow-node-body">${rows}${params}</div>
+      </article>`;
+    }).join("");
+
+    const graphLabel = graph.kind === "api" ? "AUTO-ARRANGED API GRAPH" : "SAVED COMFYUI LAYOUT";
+    panel.innerHTML = `<div class="workflow-graph">
+      <div class="workflow-toolbar">
+        <div class="workflow-summary"><span>${graphLabel}</span><strong>${prepared.length} NODES · ${renderedLinks.length} LINKS</strong></div>
+        <div class="workflow-controls">
+          <button data-workflow-action="zoom-out" title="Zoom out">${icon("minus")}</button>
+          <output id="workflowZoomValue">100%</output>
+          <button data-workflow-action="zoom-in" title="Zoom in">${icon("plus")}</button>
+          <button class="fit" data-workflow-action="fit">Fit workflow</button>
+        </div>
+      </div>
+      <div class="workflow-canvas" tabindex="0" aria-label="Read-only ComfyUI workflow. Scroll to zoom and drag the background to pan.">
+        <div class="workflow-scene" style="width:${width}px;height:${height}px">
+          <div class="workflow-groups">${groupMarkup}</div>
+          <svg class="workflow-links" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" aria-hidden="true">${links}</svg>
+          <div class="workflow-nodes">${nodes}</div>
+        </div>
+        <div class="workflow-help">Scroll to zoom · drag to pan · double-click to fit</div>
+      </div>
+    </div>`;
+
+    const canvas = $(".workflow-canvas", panel);
+    const scene = $(".workflow-scene", panel);
+    state.workflowView = { canvas, scene, width, height, scale: 1, x: 0, y: 0, drag: null };
+    $$('[data-workflow-action]', panel).forEach(button => button.addEventListener("click", () => {
+      if (button.dataset.workflowAction === "fit") fitWorkflowGraph();
+      else zoomWorkflow(button.dataset.workflowAction === "zoom-in" ? 1.2 : 1 / 1.2);
+    }));
+    canvas.addEventListener("wheel", event => {
+      event.preventDefault();
+      zoomWorkflow(event.deltaY < 0 ? 1.12 : 1 / 1.12, event.clientX, event.clientY);
+    }, { passive: false });
+    canvas.addEventListener("pointerdown", event => {
+      if (event.button !== 0 || event.target.closest("button, .workflow-node")) return;
+      const view = state.workflowView;
+      view.drag = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, x: view.x, y: view.y };
+      canvas.setPointerCapture(event.pointerId);
+      canvas.classList.add("panning");
+    });
+    canvas.addEventListener("pointermove", event => {
+      const view = state.workflowView;
+      if (!view?.drag || view.drag.pointerId !== event.pointerId) return;
+      view.x = view.drag.x + event.clientX - view.drag.startX;
+      view.y = view.drag.y + event.clientY - view.drag.startY;
+      applyWorkflowTransform();
+    });
+    const endPan = event => {
+      const view = state.workflowView;
+      if (!view?.drag || view.drag.pointerId !== event.pointerId) return;
+      view.drag = null;
+      canvas.classList.remove("panning");
+    };
+    canvas.addEventListener("pointerup", endPan);
+    canvas.addEventListener("pointercancel", endPan);
+    canvas.addEventListener("dblclick", event => { if (!event.target.closest(".workflow-node")) fitWorkflowGraph(); });
+    $$(".workflow-node", panel).forEach(node => node.addEventListener("click", () => {
+      $$(".workflow-node", panel).forEach(row => row.classList.toggle("selected", row === node));
+    }));
+    if ($("#viewer").classList.contains("workflow-view")) requestAnimationFrame(fitWorkflowGraph);
   }
 
   function setInspectorTab(tab) {
@@ -551,6 +832,8 @@
     $$(".tab-panel").forEach(panel => panel.classList.toggle("active", panel.dataset.panel === tab));
     const inspectorBody = $(".inspector-body");
     if (inspectorBody) inspectorBody.scrollTop = 0;
+    $("#viewer").classList.toggle("workflow-view", tab === "workflow");
+    if (tab === "workflow") requestAnimationFrame(fitWorkflowGraph);
   }
 
   async function navigateViewer(direction) {
@@ -564,9 +847,11 @@
 
   function closeViewer() {
     $("#viewer").classList.add("hidden");
+    $("#viewer").classList.remove("workflow-view");
     $("#mediaCanvas").innerHTML = "";
     state.viewerIndex = -1;
     state.metadata = null;
+    state.workflowView = null;
     document.body.style.overflow = "";
     resetZoom();
   }
@@ -738,6 +1023,7 @@
   window.addEventListener("resize", syncUiScaleBreakpoints);
 
   $("#closeViewerBtn").addEventListener("click", closeViewer);
+  $("#workflowCloseBtn").addEventListener("click", closeViewer);
   $("#viewerStage").addEventListener("click", event => { if (!isPointOnRenderedMedia(event)) closeViewer(); });
   $("#viewerPrev").addEventListener("click", () => navigateViewer(-1));
   $("#viewerNext").addEventListener("click", () => navigateViewer(1));

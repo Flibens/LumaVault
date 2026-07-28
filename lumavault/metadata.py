@@ -2,11 +2,15 @@
 Standalone: no ComfyUI imports or running server required.
 """
 
+import hashlib
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
+import tempfile
+from itertools import islice
 from pathlib import Path
 
 try:
@@ -14,6 +18,25 @@ try:
 except ImportError:
     Image = None
     ExifTags = None
+
+WORKFLOW_MAX_NODES = 5_000
+WORKFLOW_MAX_LINKS = 20_000
+WORKFLOW_MAX_SUBGRAPHS = 128
+WORKFLOW_MAX_PORTS = 512
+WORKFLOW_MAX_TOTAL_PORTS = 40_000
+WORKFLOW_MAX_PARAMS = 64
+WORKFLOW_MAX_TEXT_LENGTH = 2_048
+WORKFLOW_MAX_PROMPT_LENGTH = 20_000
+WORKFLOW_MAX_ID_LENGTH = 512
+WORKFLOW_MAX_LORAS = 128
+WORKFLOW_RAW_SCAN_BYTES = 16 * 1024 * 1024
+WORKFLOW_MAX_EMBEDDED_JSON_BYTES = 4 * 1024 * 1024
+WORKFLOW_MAX_RAW_DISPLAY_BYTES = 8 * 1024 * 1024
+WORKFLOW_MAX_SCAN_CANDIDATES = 32
+WORKFLOW_MAX_METADATA_ENTRIES = 256
+WORKFLOW_MAX_RESOLVE_STEPS = 80_000
+WORKFLOW_MAX_RESOLVER_CACHE = 512
+_RESOLVER_MEMO_KEY = object()
 
 def _safe_str(value):
     if value is None:
@@ -24,6 +47,114 @@ def _safe_str(value):
         except Exception:
             return f"<{len(value)} bytes>"
     return str(value)
+
+
+def _finite_json_value(value, depth=0):
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if depth >= 8:
+        return _workflow_text(value)
+    if isinstance(value, dict):
+        return {
+            _workflow_text(key): _finite_json_value(item, depth + 1)
+            for key, item in islice(value.items(), 256)
+        }
+    if isinstance(value, (list, tuple)):
+        return [_finite_json_value(item, depth + 1) for item in islice(value, 256)]
+    return _workflow_text(value)
+
+
+def raw_metadata_for_display(metadata):
+    """Return bounded, strict-JSON metadata while retaining workflow and prompt trees."""
+    remaining_text = [WORKFLOW_MAX_RAW_DISPLAY_BYTES]
+
+    def bounded_text(value):
+        candidate = value[:WORKFLOW_MAX_PROMPT_LENGTH]
+        encoded = candidate.encode("utf-8", errors="ignore")
+        if len(encoded) <= remaining_text[0]:
+            remaining_text[0] -= len(encoded)
+            return candidate
+        prefix = encoded[:remaining_text[0]].decode("utf-8", errors="ignore")
+        remaining_text[0] -= len(prefix.encode("utf-8"))
+        return prefix
+
+    def clean(value, depth=0):
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, str):
+            return bounded_text(value)
+        if isinstance(value, bytes):
+            return clean(value.decode("utf-8", errors="ignore"), depth)
+        if isinstance(value, (int, bool)) or value is None:
+            return value
+        if depth >= 12:
+            return clean(_workflow_text(value), depth)
+        if isinstance(value, dict):
+            result = {}
+            priority = ("CreationTime", "prompt", "workflow", "parameters") if depth == 0 else ()
+            if priority:
+                for key in priority:
+                    if key in value and len(result) < WORKFLOW_MAX_METADATA_ENTRIES:
+                        result[key] = clean(value[key], depth + 1)
+            for key, item in value.items():
+                if key in priority or len(result) >= WORKFLOW_MAX_METADATA_ENTRIES:
+                    continue
+                if remaining_text[0] <= 0:
+                    break
+                result[_workflow_text(key)] = clean(item, depth + 1)
+            return result
+        if isinstance(value, (list, tuple)):
+            result = []
+            for item in islice(value, WORKFLOW_MAX_METADATA_ENTRIES):
+                if remaining_text[0] <= 0:
+                    break
+                result.append(clean(item, depth + 1))
+            return result
+        return clean(_workflow_text(value), depth)
+
+    return clean(metadata)
+
+
+def _workflow_text(value):
+    def preview(item, depth=0):
+        if item is None:
+            return ""
+        if isinstance(item, str):
+            return item[:WORKFLOW_MAX_TEXT_LENGTH]
+        if isinstance(item, bytes):
+            return item[:WORKFLOW_MAX_TEXT_LENGTH].decode("utf-8", errors="ignore")
+        if isinstance(item, dict):
+            if depth >= 2:
+                return f"<{len(item)} values>"
+            parts = [
+                f"{preview(key, depth + 1)[:64]}: {preview(nested, depth + 1)}"
+                for key, nested in islice(item.items(), 8)
+            ]
+            if len(item) > 8:
+                parts.append(f"… {len(item) - 8} more")
+            return "{" + ", ".join(parts) + "}"
+        if isinstance(item, (list, tuple, set)):
+            if depth >= 2:
+                return f"<{len(item)} values>"
+            parts = [preview(nested, depth + 1) for nested in islice(iter(item), 8)]
+            if len(item) > 8:
+                parts.append(f"… {len(item) - 8} more")
+            return "[" + ", ".join(parts) + "]"
+        return _safe_str(item)[:WORKFLOW_MAX_TEXT_LENGTH]
+
+    return preview(value)[:WORKFLOW_MAX_TEXT_LENGTH]
+
+
+def _workflow_id(value):
+    text = value if isinstance(value, str) else _workflow_text(value)
+    if len(text) <= WORKFLOW_MAX_ID_LENGTH:
+        return text
+    sample = f"{text[:4096]}|{text[-256:]}|{len(text)}"
+    digest = hashlib.sha256(sample.encode("utf-8", errors="ignore")).hexdigest()
+    keep = WORKFLOW_MAX_ID_LENGTH - len(digest) - 1
+    return f"{text[:keep]}~{digest}"
 
 def extract_metadata(image_path):
     """Extract metadata from image (PNG/JPEG/WEBP/etc)"""
@@ -36,20 +167,21 @@ def extract_metadata(image_path):
             
             # Extract PNG text chunks (ComfyUI stores workflow here)
             if hasattr(img, 'text'):
-                for key, value in img.text.items():
+                for key, value in islice(img.text.items(), WORKFLOW_MAX_METADATA_ENTRIES):
                     metadata[key] = value
             
             # Also check PNG info dict
             if hasattr(img, 'info'):
-                for key, value in img.info.items():
+                for key, value in islice(img.info.items(), WORKFLOW_MAX_METADATA_ENTRIES):
                     if key not in metadata:
                         metadata[key] = value
 
             # EXIF (JPEG/WEBP/etc)
             exif_data = {}
             try:
-                if hasattr(img, "_getexif") and img._getexif():
-                    for tag, val in img._getexif().items():
+                exif = img._getexif() if hasattr(img, "_getexif") else None
+                if exif:
+                    for tag, val in islice(exif.items(), WORKFLOW_MAX_METADATA_ENTRIES):
                         name = ExifTags.TAGS.get(tag, str(tag)) if Image else str(tag)
                         exif_data[name] = val
             except Exception:
@@ -72,7 +204,8 @@ def extract_metadata(image_path):
             for key in ['prompt', 'workflow']:
                 if key in metadata and isinstance(metadata[key], str):
                     try:
-                        metadata[key] = json.loads(metadata[key])
+                        if len(metadata[key]) <= WORKFLOW_MAX_EMBEDDED_JSON_BYTES:
+                            metadata[key] = json.loads(metadata[key])
                     except:
                         pass
             
@@ -106,37 +239,56 @@ def _scan_bytes_for_workflow(content_bytes):
     Yield valid JSON object strings found in a binary stream by brace matching.
     """
     try:
-        stream_str = content_bytes.decode('utf-8', errors='ignore')
+        stream_str = bytes(content_bytes[:WORKFLOW_RAW_SCAN_BYTES]).decode('utf-8', errors='ignore')
     except Exception:
         return
 
     start_pos = 0
-    while True:
+    candidates_examined = 0
+    while candidates_examined < WORKFLOW_MAX_SCAN_CANDIDATES:
         first_brace = stream_str.find('{', start_pos)
         if first_brace == -1:
             break
 
         open_braces = 0
         start_index = first_brace
+        in_string = False
+        escaped = False
 
         for i in range(start_index, len(stream_str)):
             char = stream_str[i]
-            if char == '{':
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == '\\':
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == '{':
                 open_braces += 1
             elif char == '}':
                 open_braces -= 1
 
             if open_braces == 0:
                 candidate = stream_str[start_index:i + 1]
+                candidates_examined += 1
                 try:
                     json.loads(candidate)
                     yield candidate
+                    start_pos = i + 1
                 except Exception:
-                    pass
-                start_pos = i + 1
+                    start_pos = start_index + 1
+                break
+            if i - start_index + 1 > WORKFLOW_MAX_EMBEDDED_JSON_BYTES:
+                candidates_examined += 1
+                start_pos = start_index + 1
                 break
         else:
-            break
+            candidates_examined += 1
+            start_pos = start_index + 1
 
 def extract_workflow_from_file(file_path):
     """
@@ -160,21 +312,24 @@ def extract_workflow_from_file(file_path):
             try:
                 cmd = [ffprobe_bin, '-v', 'quiet', '-print_format', 'json', '-show_format', str(file_path)]
                 creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    encoding='utf-8',
-                    errors='ignore',
-                    check=True,
-                    creationflags=creationflags
-                )
-                ff_data = json.loads(result.stdout)
+                with tempfile.TemporaryFile() as output:
+                    subprocess.run(
+                        cmd,
+                        stdout=output,
+                        stderr=subprocess.DEVNULL,
+                        check=True,
+                        timeout=15,
+                        creationflags=creationflags,
+                    )
+                    output.seek(0)
+                    ff_output = output.read(WORKFLOW_RAW_SCAN_BYTES)
+                ff_data = json.loads(ff_output.decode('utf-8', errors='ignore'))
                 tags = ff_data.get('format', {}).get('tags', {})
                 if isinstance(tags, dict):
-                    for value in tags.values():
+                    for value in islice(tags.values(), WORKFLOW_MAX_METADATA_ENTRIES):
                         if not isinstance(value, str):
                             continue
+                        value = value[:WORKFLOW_MAX_EMBEDDED_JSON_BYTES]
                         if value.strip().startswith('{'):
                             analyze_json(value)
                         elif '{' in value:
@@ -203,9 +358,20 @@ def extract_workflow_from_file(file_path):
     if not found:
         try:
             with open(file_path, 'rb') as f:
-                content = f.read()
-            for json_str in _scan_bytes_for_workflow(content):
-                analyze_json(json_str)
+                window = WORKFLOW_RAW_SCAN_BYTES // 2
+                size = os.fstat(f.fileno()).st_size
+                head = f.read(window)
+                tail = b''
+                if size > window:
+                    f.seek(max(window, size - window))
+                    tail = f.read(window)
+            for content in (head, tail):
+                if not content:
+                    continue
+                for json_str in _scan_bytes_for_workflow(content):
+                    analyze_json(json_str)
+                    if 'ui' in found and 'api' in found:
+                        break
                 if 'ui' in found and 'api' in found:
                     break
         except Exception:
@@ -220,7 +386,7 @@ def extract_workflow_from_file(file_path):
 def _parse_parameters_text(params_text, parsed):
     if not params_text or not isinstance(params_text, str):
         return
-    text = params_text.strip()
+    text = params_text[:WORKFLOW_MAX_PROMPT_LENGTH].strip()
     if not text:
         return
 
@@ -314,17 +480,14 @@ def _parse_parameters_text(params_text, parsed):
             lora_name = lora_name.strip()
             if lora_name and lora_name not in ['None', '', 'ComfyUI']:
                 if not any(l['name'] == lora_name for l in parsed['loras']):
-                    parsed['loras'].append({
-                        'name': lora_name,
-                        'strength_model': float(strength),
-                        'strength_clip': float(strength)
-                    })
+                    _add_lora(parsed, lora_name, float(strength), float(strength))
 
 def _sanitize_prompt_text(prompt_text):
     """Remove inline LoRA tags from display prompt while preserving line structure."""
     if not isinstance(prompt_text, str):
         return prompt_text
 
+    prompt_text = prompt_text[:WORKFLOW_MAX_PROMPT_LENGTH]
     cleaned = re.sub(r'[ \t]*<lora:[^>]+>[ \t]*', ' ', prompt_text, flags=re.IGNORECASE)
     out_lines = []
     for line in cleaned.splitlines():
@@ -346,7 +509,16 @@ def _decode_json_maybe(value):
 
 
 def _is_link_ref(value):
-    return isinstance(value, (list, tuple)) and len(value) >= 1 and isinstance(value[0], (str, int))
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return False
+    node_id, slot = value
+    return (
+        isinstance(node_id, (str, int))
+        and not isinstance(node_id, bool)
+        and isinstance(slot, int)
+        and not isinstance(slot, bool)
+        and slot >= 0
+    )
 
 
 def _node_title(node):
@@ -369,22 +541,38 @@ def _iter_ui_workflow_nodes(workflow_data):
     if not isinstance(workflow_data, dict):
         return
 
-    for node in workflow_data.get('nodes', []) or []:
+    yielded = 0
+    for node in islice(workflow_data.get('nodes', []) or [], WORKFLOW_MAX_NODES):
         if isinstance(node, dict):
             yield node, '', None
+            yielded += 1
 
     definitions = workflow_data.get('definitions')
     if not isinstance(definitions, dict):
         return
 
-    for subgraph in definitions.get('subgraphs', []) or []:
+    raw_subgraphs = definitions.get('subgraphs', [])
+    if not isinstance(raw_subgraphs, list):
+        return
+    used_subgraph_ids = set()
+    for subgraph_index, subgraph in enumerate(islice(raw_subgraphs, WORKFLOW_MAX_SUBGRAPHS)):
+        if yielded >= WORKFLOW_MAX_NODES:
+            break
         if not isinstance(subgraph, dict):
             continue
-        subgraph_id = _safe_str(subgraph.get('id') or subgraph.get('name') or 'subgraph')
-        subgraph_name = _safe_str(subgraph.get('name') or subgraph_id)
-        for node in subgraph.get('nodes', []) or []:
+        base_id = _workflow_id(subgraph.get('id') or subgraph.get('name') or f'subgraph-{subgraph_index + 1}')
+        subgraph_id = base_id
+        suffix = 2
+        while subgraph_id in used_subgraph_ids:
+            subgraph_id = _workflow_id(f'{base_id}~{suffix}')
+            suffix += 1
+        used_subgraph_ids.add(subgraph_id)
+        subgraph_name = _workflow_text(subgraph.get('name') or subgraph_id)
+        remaining = WORKFLOW_MAX_NODES - yielded
+        for node in islice(subgraph.get('nodes', []) or [], remaining):
             if isinstance(node, dict):
                 yield node, f'{subgraph_id}:', subgraph_name
+                yielded += 1
 
 
 def _coerce_number(value):
@@ -401,55 +589,220 @@ def _coerce_number(value):
     return None
 
 
-def _resolve_api_value(prompt_graph, value, preferred_names=None, want='text', visited=None):
+def _build_showtext_snapshots(prompt_graph):
+    snapshots = {}
+    for consumer in islice(prompt_graph.values(), WORKFLOW_MAX_NODES):
+        if not isinstance(consumer, dict) or 'showtext' not in _node_type(consumer).lower():
+            continue
+        consumer_inputs = consumer.get('inputs', {})
+        if not isinstance(consumer_inputs, dict):
+            continue
+        snapshot = next((
+            consumer_inputs[name].strip()
+            for name in islice(consumer_inputs, WORKFLOW_MAX_PORTS)
+            if str(name).startswith('text_')
+            and isinstance(consumer_inputs.get(name), str)
+            and consumer_inputs[name].strip()
+        ), None)
+        if not snapshot:
+            continue
+        for input_value in islice(consumer_inputs.values(), WORKFLOW_MAX_PORTS):
+            if _is_link_ref(input_value):
+                snapshots.setdefault(str(input_value[0]), snapshot)
+    return snapshots
+
+
+def _bounded_join_text(parts, delimiter=''):
+    delimiter = delimiter if isinstance(delimiter, str) else ''
+    delimiter = delimiter[:WORKFLOW_MAX_TEXT_LENGTH]
+    pieces = []
+    remaining = WORKFLOW_MAX_PROMPT_LENGTH
+    for part in parts:
+        if not isinstance(part, str) or not part.strip() or remaining <= 0:
+            continue
+        part = part.strip()
+        if pieces and delimiter:
+            separator = delimiter[:remaining]
+            pieces.append(separator)
+            remaining -= len(separator)
+        if remaining <= 0:
+            break
+        piece = part[:remaining]
+        pieces.append(piece)
+        remaining -= len(piece)
+    return ''.join(pieces).strip() or None
+
+
+def _resolve_api_text_iterative(
+    prompt_graph, value, preferred_names=None, visited=None, showtext_snapshots=None,
+):
+    preferred_names = list(preferred_names or [])
+    snapshots = showtext_snapshots
+    if snapshots is None:
+        snapshots = _build_showtext_snapshots(prompt_graph)
+    memo = snapshots.setdefault(_RESOLVER_MEMO_KEY, {})
+    active = set(visited or ())
+    results = []
+    stack = [('eval', value)]
+    steps = 0
+
+    def cache_result(node_key, result):
+        cache_key = (node_key, tuple(preferred_names))
+        if result is None:
+            return
+        if cache_key not in memo and len(memo) >= WORKFLOW_MAX_RESOLVER_CACHE:
+            memo.pop(next(iter(memo)))
+        memo[cache_key] = result
+
+    while stack and steps < WORKFLOW_MAX_RESOLVE_STEPS:
+        steps += 1
+        frame = stack.pop()
+        operation = frame[0]
+
+        if operation == 'finish':
+            _, node_key, count, delimiter = frame
+            parts = results[-count:] if count else []
+            if count:
+                del results[-count:]
+            result = _bounded_join_text(parts, delimiter)
+            active.discard(node_key)
+            cache_result(node_key, result)
+            results.append(result)
+            continue
+
+        if operation == 'forward':
+            node_key = frame[1]
+            result = results[-1] if results else None
+            active.discard(node_key)
+            cache_result(node_key, result)
+            continue
+
+        current = frame[1]
+        if not _is_link_ref(current):
+            result = current.strip()[:WORKFLOW_MAX_PROMPT_LENGTH] if isinstance(current, str) else None
+            results.append(result or None)
+            continue
+
+        node_key = str(current[0])
+        cache_key = (node_key, tuple(preferred_names))
+        if cache_key in memo:
+            results.append(memo[cache_key])
+            continue
+        if node_key in active:
+            results.append(None)
+            continue
+        if node_key in snapshots:
+            result = snapshots[node_key][:WORKFLOW_MAX_PROMPT_LENGTH]
+            cache_result(node_key, result)
+            results.append(result)
+            continue
+
+        ref_node = prompt_graph.get(node_key)
+        if not isinstance(ref_node, dict):
+            results.append(None)
+            continue
+        inputs = ref_node.get('inputs', {})
+        if not isinstance(inputs, dict):
+            results.append(None)
+            continue
+        bounded_inputs = dict(islice(inputs.items(), WORKFLOW_MAX_PORTS))
+        active.add(node_key)
+
+        if 'stringconcatenate' in _node_type(ref_node).lower():
+            operands = [
+                bounded_inputs[name]
+                for name in sorted(bounded_inputs, key=str)
+                if str(name).startswith('string_')
+            ]
+            stack.append(('finish', node_key, len(operands), bounded_inputs.get('delimiter', '')))
+            for operand in reversed(operands):
+                stack.append(('eval', operand))
+            continue
+
+        candidate_names = preferred_names + [
+            'text', 'prompt', 'positive', 'negative', 'string', 'string_a', 'value', 'name'
+        ]
+        selected = next((bounded_inputs[name] for name in candidate_names if name in bounded_inputs), None)
+        if selected is None:
+            selected = next(iter(bounded_inputs.values()), None)
+        stack.append(('forward', node_key))
+        stack.append(('eval', selected))
+
+    if stack or not results:
+        return None
+    return results[-1]
+
+
+def _resolve_api_value(
+    prompt_graph, value, preferred_names=None, want='text', visited=None,
+    showtext_snapshots=None,
+):
     """Resolve a ComfyUI API graph input, following links through text/prompt/string/size helper nodes."""
-    if visited is None:
-        visited = set()
     preferred_names = preferred_names or []
+    if want == 'text':
+        return _resolve_api_text_iterative(
+            prompt_graph, value, preferred_names, visited, showtext_snapshots,
+        )
+    seen = set(visited or ())
+    current = value
 
-    if _is_link_ref(value):
-        node_key = str(value[0])
-        if node_key in visited:
+    if not _is_link_ref(current):
+        if want == 'number':
+            return _coerce_number(current)
+        if isinstance(current, str):
+            return current.strip()
+        return current if current is not None and want != 'text' else None
+
+    if showtext_snapshots is None:
+        showtext_snapshots = _build_showtext_snapshots(prompt_graph) if want == 'text' else {}
+
+    for _ in range(WORKFLOW_MAX_NODES):
+        if not _is_link_ref(current):
+            if want == 'number':
+                return _coerce_number(current)
+            if isinstance(current, str):
+                return current.strip()
+            return current if current is not None and want != 'text' else None
+
+        node_key = str(current[0])
+        if node_key in seen:
             return None
-        visited.add(node_key)
-
-        # Runtime text-generator outputs are links, not literal API inputs. Some
-        # workflows preserve the resolved output in a ShowText node (text_0,
-        # text_1, ...). Recover that snapshot before inspecting model settings
-        # such as model_name, which are not prompts.
-        if want == 'text':
-            for consumer in prompt_graph.values():
-                if not isinstance(consumer, dict) or 'showtext' not in _node_type(consumer).lower():
-                    continue
-                consumer_inputs = consumer.get('inputs', {})
-                if not isinstance(consumer_inputs, dict):
-                    continue
-                links_to_target = any(
-                    _is_link_ref(input_value) and str(input_value[0]) == node_key
-                    for input_value in consumer_inputs.values()
-                )
-                if not links_to_target:
-                    continue
-                for snapshot_name in sorted(name for name in consumer_inputs if str(name).startswith('text_')):
-                    snapshot = consumer_inputs.get(snapshot_name)
-                    if isinstance(snapshot, str) and snapshot.strip():
-                        return snapshot.strip()
+        seen.add(node_key)
+        if node_key in showtext_snapshots:
+            return showtext_snapshots[node_key]
 
         ref_node = prompt_graph.get(node_key)
         if not isinstance(ref_node, dict):
             return None
-        return _extract_api_node_value(prompt_graph, ref_node, preferred_names, want, visited)
+        inputs = ref_node.get('inputs', {})
+        if not isinstance(inputs, dict):
+            return None
+        bounded_inputs = dict(islice(inputs.items(), WORKFLOW_MAX_PORTS))
+        node_type_l = _node_type(ref_node).lower()
 
-    if want == 'number':
-        return _coerce_number(value)
-    if isinstance(value, str):
-        return value.strip()
-    if value is not None and want != 'text':
-        return value
+        candidate_names = list(preferred_names)
+        candidate_names.extend(
+            ['width', 'height', 'steps', 'cfg', 'seed', 'value', 'number', 'int', 'float']
+            if want == 'number'
+            else ['text', 'prompt', 'positive', 'negative', 'string', 'string_a', 'value', 'name']
+        )
+        selected = False
+        for name in candidate_names:
+            if name in bounded_inputs:
+                current = bounded_inputs[name]
+                selected = True
+                break
+        if not selected:
+            current = next(iter(bounded_inputs.values()), None)
+        if current in (None, ''):
+            return None
     return None
 
 
-def _extract_api_node_value(prompt_graph, node, preferred_names=None, want='text', visited=None):
+def _extract_api_node_value(
+    prompt_graph, node, preferred_names=None, want='text', visited=None,
+    showtext_snapshots=None,
+):
     preferred_names = preferred_names or []
     visited = visited or set()
     inputs = node.get('inputs', {}) if isinstance(node, dict) else {}
@@ -463,15 +816,21 @@ def _extract_api_node_value(prompt_graph, node, preferred_names=None, want='text
             delimiter = ''
         parts = []
         for key in sorted([k for k in inputs if str(k).startswith('string_')]):
-            part = _resolve_api_value(prompt_graph, inputs.get(key), want='text', visited=set(visited))
+            part = _resolve_api_value(
+                prompt_graph, inputs.get(key), want='text', visited=set(visited),
+                showtext_snapshots=showtext_snapshots,
+            )
             if isinstance(part, str) and part.strip():
                 parts.append(part.strip())
         if parts:
-            return delimiter.join(parts).strip()
+            return _bounded_join_text(parts, delimiter)
 
     for name in preferred_names:
         if name in inputs:
-            resolved = _resolve_api_value(prompt_graph, inputs.get(name), preferred_names, want, set(visited))
+            resolved = _resolve_api_value(
+                prompt_graph, inputs.get(name), preferred_names, want, set(visited),
+                showtext_snapshots,
+            )
             if resolved not in (None, ''):
                 return resolved
     if want == 'text' and any(name in inputs for name in preferred_names):
@@ -482,32 +841,44 @@ def _extract_api_node_value(prompt_graph, node, preferred_names=None, want='text
     if want == 'number':
         for name in ['width', 'height', 'steps', 'cfg', 'seed', 'value', 'number', 'int', 'float']:
             if name in inputs:
-                resolved = _resolve_api_value(prompt_graph, inputs.get(name), preferred_names, want, set(visited))
+                resolved = _resolve_api_value(
+                    prompt_graph, inputs.get(name), preferred_names, want, set(visited),
+                    showtext_snapshots,
+                )
                 if resolved is not None:
                     return resolved
         for value in inputs.values():
-            resolved = _resolve_api_value(prompt_graph, value, preferred_names, want, set(visited))
+            resolved = _resolve_api_value(
+                prompt_graph, value, preferred_names, want, set(visited), showtext_snapshots,
+            )
             if resolved is not None:
                 return resolved
         return None
 
     for name in ['text', 'prompt', 'positive', 'negative', 'string', 'string_a', 'value', 'name']:
         if name in inputs:
-            resolved = _resolve_api_value(prompt_graph, inputs.get(name), preferred_names, want, set(visited))
+            resolved = _resolve_api_value(
+                prompt_graph, inputs.get(name), preferred_names, want, set(visited),
+                showtext_snapshots,
+            )
             if isinstance(resolved, str) and resolved.strip():
                 return resolved.strip()
 
     for value in inputs.values():
-        resolved = _resolve_api_value(prompt_graph, value, preferred_names, want, set(visited))
+        resolved = _resolve_api_value(
+            prompt_graph, value, preferred_names, want, set(visited), showtext_snapshots,
+        )
         if isinstance(resolved, str) and resolved.strip():
             return resolved.strip()
     return None
 
 
 def _add_lora(parsed, name, strength_model=1.0, strength_clip=None):
+    if len(parsed['loras']) >= WORKFLOW_MAX_LORAS:
+        return
     if not name:
         return
-    lora_name = str(name).strip()
+    lora_name = _workflow_text(name).strip()
     if lora_name in ['None', '', 'ComfyUI']:
         return
     if any(l['name'] == lora_name for l in parsed['loras']):
@@ -565,7 +936,7 @@ def parse_comfy_metadata(metadata):
         # If there is EXIF, scan for prompt-like text
         exif = metadata.get('EXIF')
         if isinstance(exif, dict):
-            for k, v in exif.items():
+            for k, v in islice(exif.items(), 256):
                 if isinstance(v, str) and any(x in v for x in ['Steps:', 'Sampler:', 'Negative prompt:', 'CFG']):
                     _parse_parameters_text(v, parsed)
 
@@ -573,29 +944,20 @@ def parse_comfy_metadata(metadata):
         if 'parameters' in metadata:
             params_text = metadata['parameters']
             if isinstance(params_text, str):
+                params_text = params_text[:WORKFLOW_MAX_PROMPT_LENGTH]
                 lines = params_text.split('\n')
                 full_text = '\n'.join(lines[1:]) if len(lines) > 1 else ''
 
                 # Also extract from Lora hashes field
-                lora_match = re.search(r'Lora hashes:\s*"([^"]+)"', full_text)
+                lora_match = re.search(r'Lora hashes:\s*"([^"\n]+)', full_text)
                 if lora_match:
                     lora_text = lora_match.group(1)
-                    lora_pairs = lora_text.split(',')
-                    for pair in lora_pairs:
+                    for pair in islice(lora_text.split(','), WORKFLOW_MAX_LORAS):
                         if ':' in pair:
                             lora_name = pair.split(':')[0].strip()
-                            # Only add valid LoRA names and avoid duplicates
-                            if lora_name and lora_name not in ['None', '', 'ComfyUI']:
-                                if not any(l['name'] == lora_name for l in parsed['loras']):
-                                    # Try to extract strength from prompt
-                                    strength_match = re.search(rf'<lora:{re.escape(lora_name)}:([\d.]+)>', parsed['prompt'] or '')
-                                    strength = float(strength_match.group(1)) if strength_match else 1.0
-                                    
-                                    parsed['loras'].append({
-                                        'name': lora_name,
-                                        'strength_model': strength,
-                                        'strength_clip': strength
-                                    })
+                            strength_match = re.search(rf'<lora:{re.escape(lora_name)}:([\d.]+)>', parsed['prompt'] or '')
+                            strength = float(strength_match.group(1)) if strength_match else 1.0
+                            _add_lora(parsed, lora_name, strength, strength)
         
         # ComfyUI UI workflow format. Newer ComfyUI can keep important nodes inside
         # workflow.definitions.subgraphs, so iterate both top-level and subgraph nodes.
@@ -604,7 +966,8 @@ def parse_comfy_metadata(metadata):
             for node, _id_prefix, _subgraph_name in _iter_ui_workflow_nodes(workflow):
                 node_type = _node_type(node)
                 node_type_l = node_type.lower()
-                widgets = node.get('widgets_values', [])
+                raw_widgets = node.get('widgets_values', [])
+                widgets = raw_widgets[:WORKFLOW_MAX_PARAMS] if isinstance(raw_widgets, list) else []
                 inputs = node.get('inputs', {})
                 title = _node_title(node).lower()
 
@@ -653,10 +1016,13 @@ def parse_comfy_metadata(metadata):
                         # Never treat that display string as one giant LoRA name.
                         structured_loras = next(
                             (
-                                value for value in widgets
+                                value[:WORKFLOW_MAX_PARAMS] for value in widgets
                                 if isinstance(value, list)
                                 and value
-                                and all(isinstance(item, dict) and 'name' in item for item in value)
+                                and all(
+                                    isinstance(item, dict) and 'name' in item
+                                    for item in islice(value, WORKFLOW_MAX_PARAMS)
+                                )
                             ),
                             None,
                         )
@@ -705,6 +1071,25 @@ def parse_comfy_metadata(metadata):
         # most reliable source for images saved by core SaveImage and most custom save nodes.
         prompt_graph = _decode_json_maybe(metadata.get('prompt'))
         if isinstance(prompt_graph, dict):
+            bounded_prompt_graph = {}
+            for node_id, node in islice(prompt_graph.items(), WORKFLOW_MAX_NODES):
+                if not isinstance(node, dict):
+                    bounded_prompt_graph[node_id] = node
+                    continue
+                bounded_node = {
+                    key: node[key]
+                    for key in ('class_type', 'type', 'title')
+                    if key in node
+                }
+                node_meta = node.get('_meta')
+                if isinstance(node_meta, dict) and 'title' in node_meta:
+                    bounded_node['_meta'] = {'title': _workflow_text(node_meta.get('title'))}
+                node_inputs = node.get('inputs')
+                if isinstance(node_inputs, dict):
+                    bounded_node['inputs'] = dict(islice(node_inputs.items(), WORKFLOW_MAX_PORTS))
+                bounded_prompt_graph[node_id] = bounded_node
+            prompt_graph = bounded_prompt_graph
+            showtext_snapshots = _build_showtext_snapshots(prompt_graph)
             text_candidates = []
             api_negative_input_seen = False
             for _, node in prompt_graph.items():
@@ -737,12 +1122,20 @@ def parse_comfy_metadata(metadata):
                     if node_inputs.get('scheduler') is not None:
                         parsed['scheduler'] = node_inputs.get('scheduler')
 
-                    positive_text = _resolve_api_value(prompt_graph, node_inputs.get('positive'), ['text', 'prompt', 'positive', 'string_a', 'string'], 'text')
+                    positive_text = _resolve_api_value(
+                        prompt_graph, node_inputs.get('positive'),
+                        ['text', 'prompt', 'positive', 'string_a', 'string'], 'text',
+                        showtext_snapshots=showtext_snapshots,
+                    )
                     if positive_text:
                         parsed['prompt'] = positive_text
                     if 'negative' in node_inputs:
                         api_negative_input_seen = True
-                    negative_text = _resolve_api_value(prompt_graph, node_inputs.get('negative'), ['text', 'prompt', 'negative', 'string_a', 'string'], 'text')
+                    negative_text = _resolve_api_value(
+                        prompt_graph, node_inputs.get('negative'),
+                        ['text', 'prompt', 'negative', 'string_a', 'string'], 'text',
+                        showtext_snapshots=showtext_snapshots,
+                    )
                     if negative_text:
                         parsed['negative_prompt'] = negative_text
                     elif 'negative' in node_inputs:
@@ -773,21 +1166,33 @@ def parse_comfy_metadata(metadata):
                                 break
 
                 if any(kw in node_type_l for kw in ['lora', 'loraloader', 'lora_stack', 'lora stacker']):
-                    lora_name = _resolve_api_value(prompt_graph, node_inputs.get('lora_name') or node_inputs.get('name'), ['lora_name', 'name'], 'text')
+                    lora_name = _resolve_api_value(
+                        prompt_graph, node_inputs.get('lora_name') or node_inputs.get('name'),
+                        ['lora_name', 'name'], 'text', showtext_snapshots=showtext_snapshots,
+                    )
                     strength_model = node_inputs.get('strength_model', node_inputs.get('lora_strength', node_inputs.get('strength', 1.0)))
                     strength_clip = node_inputs.get('strength_clip', node_inputs.get('clip_strength', node_inputs.get('clipStrength', strength_model)))
                     _add_lora(parsed, lora_name, strength_model, strength_clip)
 
                 if 'emptylatentimage' in node_type_l or ('latent' in node_type_l and 'width' in node_inputs and 'height' in node_inputs):
-                    width_value = _resolve_api_value(prompt_graph, node_inputs.get('width'), ['width'], 'number')
-                    height_value = _resolve_api_value(prompt_graph, node_inputs.get('height'), ['height'], 'number')
+                    width_value = _resolve_api_value(
+                        prompt_graph, node_inputs.get('width'), ['width'], 'number',
+                        showtext_snapshots=showtext_snapshots,
+                    )
+                    height_value = _resolve_api_value(
+                        prompt_graph, node_inputs.get('height'), ['height'], 'number',
+                        showtext_snapshots=showtext_snapshots,
+                    )
                     if width_value is not None:
                         parsed['width'] = width_value
                     if height_value is not None:
                         parsed['height'] = height_value
 
                 if any(kw in node_type_l for kw in ['cliptextencode', 'textencode', 'conditioning', 'prompt']):
-                    text = _extract_api_node_value(prompt_graph, node, ['text', 'prompt', 'string_a', 'string'], 'text')
+                    text = _extract_api_node_value(
+                        prompt_graph, node, ['text', 'prompt', 'string_a', 'string'], 'text',
+                        showtext_snapshots=showtext_snapshots,
+                    )
                     if isinstance(text, str) and text.strip():
                         text_candidates.append((text.strip(), title_l))
 
@@ -827,38 +1232,51 @@ def parse_comfy_metadata(metadata):
         # as an absent negative prompt.
         parsed['negative_prompt'] = None
 
-    return parsed
+    return _finite_json_value(parsed)
 
 def flatten_metadata(metadata):
     flat = {}
-    for key, value in metadata.items():
-        if key == 'workflow':
+    for key, value in islice(metadata.items(), 256):
+        if key in {'workflow', 'prompt'}:
             continue
         if isinstance(value, dict):
-            for k2, v2 in value.items():
-                flat[f"{key}.{k2}"] = _safe_str(v2)
+            for k2, v2 in islice(value.items(), 256 - len(flat)):
+                flat[f"{_workflow_text(key)}.{_workflow_text(k2)}"] = _workflow_text(v2)
         else:
-            flat[key] = _safe_str(value)
+            flat[_workflow_text(key)] = _workflow_text(value)
+        if len(flat) >= 256:
+            break
     return flat
 
-def _normalize_node_params_from_ui_node(node):
+def _normalize_node_params_from_ui_node(node, limit=WORKFLOW_MAX_PARAMS, value_formatter=None):
     params = []
+
+    def add_param(name, value):
+        if len(params) >= limit:
+            return False
+        formatted_value = value_formatter(name, value) if value_formatter else _workflow_text(value)
+        params.append({'name': _workflow_text(name), 'value': formatted_value})
+        return True
 
     inputs = node.get('inputs', {})
     if isinstance(inputs, list):
-        for idx, item in enumerate(inputs):
+        for idx, item in enumerate(islice(inputs, limit)):
             if isinstance(item, dict):
                 name = item.get('name') or f"input_{idx + 1}"
                 value = item.get('widget', item.get('value', item.get('link')))
-                params.append({'name': str(name), 'value': _safe_str(value)})
+                if not add_param(name, value):
+                    break
     elif isinstance(inputs, dict):
-        for name, value in inputs.items():
-            params.append({'name': str(name), 'value': _safe_str(value)})
+        for name, value in islice(inputs.items(), limit):
+            if not add_param(name, value):
+                break
 
     widgets = node.get('widgets_values', [])
     if isinstance(widgets, list):
-        for idx, value in enumerate(widgets):
-            params.append({'name': f"widget_{idx + 1}", 'value': _safe_str(value)})
+        remaining = max(0, limit - len(params))
+        for idx, value in enumerate(islice(widgets, remaining)):
+            if not add_param(f"widget_{idx + 1}", value):
+                break
 
     return params
 
@@ -879,6 +1297,8 @@ def extract_workflow_nodes(metadata):
     # UI format: {"nodes":[...], "definitions":{"subgraphs":[...]}}
     if isinstance(source, dict) and isinstance(source.get('nodes'), list):
         for node, id_prefix, subgraph_name in _iter_ui_workflow_nodes(source):
+            if len(nodes_out) >= WORKFLOW_MAX_NODES:
+                break
             if not isinstance(node, dict):
                 continue
             if node.get('mode', 0) != 0:
@@ -888,24 +1308,25 @@ def extract_workflow_nodes(metadata):
             params = _normalize_node_params_from_ui_node(node)
             if subgraph_name:
                 params.insert(0, {'name': 'subgraph', 'value': subgraph_name})
+                params = params[:WORKFLOW_MAX_PARAMS]
             nodes_out.append({
-                'id': f"{id_prefix}{_safe_str(node_id)}",
-                'type': _safe_str(node_type),
+                'id': _workflow_id(f"{id_prefix}{node_id}"),
+                'type': _workflow_text(node_type),
                 'params': params
             })
     # API format: {"3":{"class_type":"KSampler","inputs":{...}}, ...}
     elif isinstance(source, dict):
-        for node_id, node in source.items():
+        for node_id, node in islice(source.items(), WORKFLOW_MAX_NODES):
             if not isinstance(node, dict) or 'class_type' not in node:
                 continue
             params = []
             inputs = node.get('inputs', {})
             if isinstance(inputs, dict):
-                for name, value in inputs.items():
-                    params.append({'name': str(name), 'value': _safe_str(value)})
+                for name, value in islice(inputs.items(), WORKFLOW_MAX_PARAMS):
+                    params.append({'name': _workflow_text(name), 'value': _workflow_text(value)})
             nodes_out.append({
-                'id': _safe_str(node_id),
-                'type': _safe_str(node.get('class_type', 'Unknown')),
+                'id': _workflow_id(node_id),
+                'type': _workflow_text(node.get('class_type', 'Unknown')),
                 'params': params
             })
 
@@ -918,3 +1339,427 @@ def extract_workflow_nodes(metadata):
 
     nodes_out.sort(key=_sort_key)
     return nodes_out
+
+
+def build_workflow_graph(workflow_data, workflow_type):
+    """Normalize embedded workflow data for the read-only visual graph viewer."""
+    if not isinstance(workflow_data, dict):
+        return {"kind": workflow_type or None, "nodes": [], "links": [], "groups": []}
+
+    max_slot = WORKFLOW_MAX_PORTS - 1
+    max_nodes = WORKFLOW_MAX_NODES
+    max_links = WORKFLOW_MAX_LINKS
+    max_subgraphs = WORKFLOW_MAX_SUBGRAPHS
+    max_params = WORKFLOW_MAX_PARAMS
+    graph_text = _workflow_text
+    graph_id = _workflow_id
+    remaining_param_text = [WORKFLOW_MAX_EMBEDDED_JSON_BYTES]
+    remaining_ports = [WORKFLOW_MAX_TOTAL_PORTS]
+
+    def graph_param_text(name, value, node_type=""):
+        if not isinstance(value, str):
+            return graph_text(value)
+        available = max(0, min(WORKFLOW_MAX_PROMPT_LENGTH, remaining_param_text[0]))
+        text = value[:available]
+        remaining_param_text[0] -= len(text)
+        return text
+
+    def graph_param(name, value, node_type=""):
+        text = graph_param_text(name, value, node_type)
+        hint = f"{name} {node_type}".lower()
+        multiline = isinstance(text, str) and (
+            len(text) > 80 or "\n" in text or any(word in hint for word in ("text", "prompt", "caption"))
+        )
+        return {"name": graph_text(name), "value": text, "multiline": multiline}
+
+    def finite_number(value, fallback, minimum=-1_000_000, maximum=1_000_000):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return float(fallback)
+        if not math.isfinite(number) or number < minimum or number > maximum:
+            return float(fallback)
+        return number
+
+    def pair(value, fallback, minimum=-1_000_000, maximum=1_000_000):
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            return [
+                finite_number(value[0], fallback[0], minimum, maximum),
+                finite_number(value[1], fallback[1], minimum, maximum),
+            ]
+        return [float(fallback[0]), float(fallback[1])]
+
+    def bounded_slot(value):
+        if not isinstance(value, int) or isinstance(value, bool):
+            return None
+        return value if 0 <= value <= max_slot else None
+
+    def slots(value):
+        if not isinstance(value, list):
+            return []
+        result = []
+        available = min(max_slot + 1, remaining_ports[0])
+        for index, item in enumerate(value[:available]):
+            if not isinstance(item, dict):
+                result.append({"name": f"slot_{index + 1}", "type": ""})
+                continue
+            result.append({
+                "name": graph_text(item.get("name") or f"slot_{index + 1}"),
+                "type": graph_text(item.get("type") or ""),
+            })
+        remaining_ports[0] -= len(result)
+        return result
+
+    def generated_slots(records):
+        available = min(len(records), remaining_ports[0])
+        result = records[:available]
+        remaining_ports[0] -= len(result)
+        return result
+
+    def reserve_identifier(candidate, used, next_suffixes):
+        candidate = graph_id(candidate)
+        if candidate not in used:
+            used.add(candidate)
+            next_suffixes.setdefault(candidate, 2)
+            return candidate
+        suffix = next_suffixes.get(candidate, 2)
+        while True:
+            marker = f"~{suffix}"
+            alternate = f"{candidate[:max(0, WORKFLOW_MAX_ID_LENGTH - len(marker))]}{marker}"
+            suffix += 1
+            if alternate not in used:
+                used.add(alternate)
+                next_suffixes[candidate] = suffix
+                return alternate
+
+    if workflow_type == "api":
+        api_nodes = {}
+        api_aliases = {}
+        used_api_ids = set()
+        api_id_suffixes = {}
+
+        def api_key(value):
+            return (type(value).__name__, graph_id(value))
+
+        for raw_node_id, node in islice(workflow_data.items(), max_nodes):
+            if isinstance(node, dict) and node.get("class_type"):
+                candidate = graph_id(raw_node_id)
+                node_id = reserve_identifier(candidate, used_api_ids, api_id_suffixes)
+                api_aliases[api_key(raw_node_id)] = node_id
+                api_aliases.setdefault(("*", candidate), node_id)
+                api_nodes[node_id] = node
+        def node_sort_key(node_id):
+            try:
+                return (0, int(node_id))
+            except (TypeError, ValueError):
+                return (1, node_id)
+
+        ordered_ids = sorted(api_nodes, key=node_sort_key)
+        incoming = {node_id: set() for node_id in ordered_ids}
+        outgoing = {node_id: set() for node_id in ordered_ids}
+        linked_inputs = {node_id: set() for node_id in ordered_ids}
+        api_links = []
+        max_output_slot = {}
+        for target_id in ordered_ids:
+            inputs = api_nodes[target_id].get("inputs", {})
+            if not isinstance(inputs, dict):
+                continue
+            for input_index, (input_name, value) in enumerate(islice(inputs.items(), max_slot + 1)):
+                if not _is_link_ref(value):
+                    continue
+                source_id = api_aliases.get(api_key(value[0])) or api_aliases.get(("*", graph_id(value[0])))
+                if source_id not in api_nodes:
+                    continue
+                source_slot = bounded_slot(value[1] if len(value) > 1 else 0)
+                if source_slot is None:
+                    continue
+                incoming[target_id].add(source_id)
+                outgoing[source_id].add(target_id)
+                linked_inputs[target_id].add(input_name)
+                max_output_slot[source_id] = max(max_output_slot.get(source_id, -1), source_slot)
+                api_links.append({
+                    "id": f"api-{len(api_links) + 1}",
+                    "from_node": source_id,
+                    "from_slot": source_slot,
+                    "to_node": target_id,
+                    "to_slot": input_index,
+                    "type": "",
+                })
+                if len(api_links) >= max_links:
+                    break
+            if len(api_links) >= max_links:
+                break
+
+        indegree = {node_id: len(incoming[node_id]) for node_id in ordered_ids}
+        depths = {node_id: 0 for node_id in ordered_ids}
+        queue = sorted((node_id for node_id in ordered_ids if indegree[node_id] == 0), key=node_sort_key)
+        processed = set()
+        cursor = 0
+        while cursor < len(queue):
+            node_id = queue[cursor]
+            cursor += 1
+            processed.add(node_id)
+            for target_id in sorted(outgoing[node_id], key=node_sort_key):
+                depths[target_id] = max(depths[target_id], depths[node_id] + 1)
+                indegree[target_id] -= 1
+                if indegree[target_id] == 0:
+                    queue.append(target_id)
+        if len(processed) != len(ordered_ids):
+            cycle_depth = max((depths[node_id] for node_id in processed), default=-1) + 1
+            for node_id in ordered_ids:
+                if node_id not in processed:
+                    depths[node_id] = cycle_depth
+
+        next_y_by_depth = {}
+        api_graph_nodes = []
+        for node_id in ordered_ids:
+            node = api_nodes[node_id]
+            depth = depths[node_id]
+            inputs = node.get("inputs", {}) if isinstance(node.get("inputs"), dict) else {}
+            input_items = list(islice(inputs.items(), max_slot + 1))
+            node_type = graph_text(node.get("class_type") or "Unknown")
+            params = [
+                graph_param(name, value, node_type)
+                for name, value in input_items[:max_params]
+                if name not in linked_inputs[node_id]
+            ]
+            input_slots = generated_slots([
+                {"name": graph_text(name), "type": ""}
+                for name, _value in input_items
+            ])
+            output_slots = generated_slots([
+                {"name": f"output_{slot}", "type": ""}
+                for slot in range(max_output_slot.get(node_id, -1) + 1)
+            ])
+            parameter_height = 14 + sum(104 if param.get("multiline") else 22 for param in params) if params else 0
+            node_height = float(max(120, 48 + max(len(input_slots), len(output_slots)) * 22 + parameter_height))
+            node_y = next_y_by_depth.get(depth, 0.0)
+            next_y_by_depth[depth] = node_y + node_height + 90.0
+            meta = node.get("_meta") if isinstance(node.get("_meta"), dict) else {}
+            api_graph_nodes.append({
+                "id": node_id,
+                "type": node_type,
+                "title": graph_text(meta.get("title") or node_type),
+                "position": [float(depth * 340), node_y],
+                "size": [260.0, node_height],
+                "inputs": input_slots,
+                "outputs": output_slots,
+                "params": params,
+                "mode": 0,
+                "color": "",
+                "bgcolor": "",
+            })
+
+        api_nodes_by_id = {node["id"]: node for node in api_graph_nodes}
+        api_links = [
+            link for link in api_links
+            if link["from_node"] in api_nodes_by_id
+            and link["to_node"] in api_nodes_by_id
+            and link["from_slot"] < len(api_nodes_by_id[link["from_node"]]["outputs"])
+            and link["to_slot"] < len(api_nodes_by_id[link["to_node"]]["inputs"])
+        ]
+        return {"kind": "api", "nodes": api_graph_nodes, "links": api_links, "groups": []}
+
+    if workflow_type != "ui" or not isinstance(workflow_data.get("nodes"), list):
+        return {"kind": workflow_type or None, "nodes": [], "links": [], "groups": []}
+
+    used_node_ids = set()
+    used_link_ids = set()
+    node_id_suffixes = {}
+    link_id_suffixes = {}
+
+    def normalize_ui_node(node, index, aliases, id_prefix="", subgraph_name=None):
+        node_type = graph_text(node.get("type") or node.get("class_type") or "Unknown")
+        params = []
+        for param in _normalize_node_params_from_ui_node(
+            node,
+            max_params,
+            lambda name, value: graph_param_text(name, value, node_type),
+        ):
+            if isinstance(param, dict):
+                value = param.get("value", "")
+                hint = f"{param.get('name', '')} {node_type}".lower()
+                params.append({
+                    "name": graph_text(param.get("name")),
+                    "value": value,
+                    "multiline": isinstance(value, str) and (
+                        len(value) > 80 or "\n" in value or any(word in hint for word in ("text", "prompt", "caption"))
+                    ),
+                })
+        scoped_id = f"{id_prefix}{graph_id(node.get('id', index))}"
+        node_id = reserve_identifier(scoped_id, used_node_ids, node_id_suffixes)
+        aliases.setdefault(scoped_id, node_id)
+        normalized = {
+            "id": node_id,
+            "type": node_type,
+            "title": graph_text(node.get("title") or node.get("type") or node.get("class_type") or "Unknown"),
+            "position": pair(node.get("pos"), (index % 4 * 320, index // 4 * 250)),
+            "size": pair(node.get("size"), (240, 150), 1, 10_000),
+            "inputs": slots(node.get("inputs")),
+            "outputs": slots(node.get("outputs")),
+            "params": params,
+            "mode": finite_number(node.get("mode", 0), 0),
+            "color": graph_text(node.get("color")),
+            "bgcolor": graph_text(node.get("bgcolor")),
+        }
+        if subgraph_name:
+            normalized["subgraph"] = subgraph_name
+        return normalized
+
+    def append_ui_links(destination, raw_links, scope_nodes, aliases, id_prefix=""):
+        if not isinstance(raw_links, (list, tuple)):
+            return
+        nodes_by_id = {node["id"]: node for node in scope_nodes}
+        remaining_links = max(0, max_links - len(destination))
+        for index, link in enumerate(islice(raw_links, remaining_links)):
+            if isinstance(link, dict):
+                raw_id = link.get("id", index)
+                raw_from_node = link.get("origin_id", link.get("from_node"))
+                raw_from_slot = link.get("origin_slot", link.get("from_slot"))
+                raw_to_node = link.get("target_id", link.get("to_node"))
+                raw_to_slot = link.get("target_slot", link.get("to_slot"))
+                link_type = link.get("type", "")
+            elif isinstance(link, (list, tuple)) and len(link) >= 5:
+                raw_id = link[0] if link[0] is not None else index
+                raw_from_node = link[1]
+                raw_from_slot = link[2]
+                raw_to_node = link[3]
+                raw_to_slot = link[4]
+                link_type = link[5] if len(link) > 5 else ""
+            else:
+                continue
+            from_slot = bounded_slot(raw_from_slot)
+            to_slot = bounded_slot(raw_to_slot)
+            if from_slot is None or to_slot is None:
+                continue
+            from_node = aliases.get(f"{id_prefix}{graph_id(raw_from_node)}")
+            to_node = aliases.get(f"{id_prefix}{graph_id(raw_to_node)}")
+            source = nodes_by_id.get(from_node)
+            target = nodes_by_id.get(to_node)
+            if not source or not target:
+                continue
+            if from_slot >= len(source["outputs"]) or to_slot >= len(target["inputs"]):
+                continue
+            destination.append({
+                "id": reserve_identifier(f"{id_prefix}{graph_id(raw_id)}", used_link_ids, link_id_suffixes),
+                "from_node": from_node,
+                "from_slot": from_slot,
+                "to_node": to_node,
+                "to_slot": to_slot,
+                "type": graph_text(link_type),
+            })
+
+    top_aliases = {}
+    top_nodes = [
+        normalize_ui_node(node, index, top_aliases)
+        for index, node in enumerate((workflow_data.get("nodes") or [])[:max_nodes])
+        if isinstance(node, dict)
+    ]
+    nodes = list(top_nodes)
+    links = []
+    groups = []
+    append_ui_links(links, workflow_data.get("links"), top_nodes, top_aliases)
+
+    top_right = max((node["position"][0] + node["size"][0] for node in top_nodes), default=-260.0)
+    top_y = min((node["position"][1] for node in top_nodes), default=0.0)
+    subgraph_x = top_right + 260.0
+    subgraph_y = top_y
+    definitions = workflow_data.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else []
+    if not isinstance(subgraphs, list):
+        subgraphs = []
+
+    used_subgraph_ids = set()
+    subgraph_id_suffixes = {}
+    for subgraph_index, subgraph in enumerate(subgraphs[:max_subgraphs]):
+        if len(nodes) >= max_nodes:
+            break
+        if not isinstance(subgraph, dict) or not isinstance(subgraph.get("nodes"), list):
+            continue
+        base_subgraph_id = graph_id(subgraph.get("id") or subgraph.get("name") or f"subgraph-{subgraph_index + 1}")
+        subgraph_id = reserve_identifier(base_subgraph_id, used_subgraph_ids, subgraph_id_suffixes)
+        subgraph_name = graph_text(subgraph.get("name") or subgraph_id)
+        id_prefix = f"{subgraph_id}:"
+        subgraph_aliases = {}
+        remaining_nodes = max_nodes - len(nodes)
+        subgraph_nodes = [
+            normalize_ui_node(node, index, subgraph_aliases, id_prefix, subgraph_name)
+            for index, node in enumerate((subgraph.get("nodes") or [])[:remaining_nodes])
+            if isinstance(node, dict)
+        ]
+        for interface_key, title, ports_key, ports_side in (
+            ("inputNode", "Subgraph Inputs", "inputs", "outputs"),
+            ("outputNode", "Subgraph Outputs", "outputs", "inputs"),
+        ):
+            if len(nodes) + len(subgraph_nodes) >= max_nodes:
+                break
+            interface = subgraph.get(interface_key)
+            if not isinstance(interface, dict) or interface.get("id") is None:
+                continue
+            bounding = interface.get("bounding")
+            if not isinstance(bounding, (list, tuple)):
+                bounding = []
+            scoped_interface_id = f"{id_prefix}{graph_id(interface.get('id'))}"
+            interface_node_id = reserve_identifier(scoped_interface_id, used_node_ids, node_id_suffixes)
+            subgraph_aliases.setdefault(scoped_interface_id, interface_node_id)
+            interface_node = {
+                "id": interface_node_id,
+                "type": title.replace(" ", ""),
+                "title": title,
+                "position": pair(bounding[:2], (0, 0)),
+                "size": pair(bounding[2:4], (140, 120), 1, 10_000),
+                "inputs": slots(subgraph.get(ports_key)) if ports_side == "inputs" else [],
+                "outputs": slots(subgraph.get(ports_key)) if ports_side == "outputs" else [],
+                "params": [],
+                "mode": 0,
+                "color": "",
+                "bgcolor": "",
+                "subgraph": subgraph_name,
+            }
+            subgraph_nodes.append(interface_node)
+        if not subgraph_nodes:
+            continue
+
+        def rendered_node_size(node):
+            width = max(210.0, min(420.0, node["size"][0]))
+            content_height = 48.0 + max(len(node["inputs"]), len(node["outputs"])) * 22.0
+            if node["params"]:
+                content_height += 14.0 + sum(
+                    104.0 if param.get("multiline") else 22.0
+                    for param in node["params"][:7]
+                )
+            height = max(92.0, min(12_000.0, max(node["size"][1], content_height)))
+            return width, height
+
+        local_min_x = min(node["position"][0] for node in subgraph_nodes)
+        local_min_y = min(node["position"][1] for node in subgraph_nodes)
+        local_max_x = max(
+            node["position"][0] + rendered_node_size(node)[0]
+            for node in subgraph_nodes
+        )
+        local_max_y = max(
+            node["position"][1] + rendered_node_size(node)[1]
+            for node in subgraph_nodes
+        )
+        padding_x = 74.0
+        padding_top = 88.0
+        padding_bottom = 64.0
+        group_width = local_max_x - local_min_x + padding_x * 2
+        group_height = local_max_y - local_min_y + padding_top + padding_bottom
+        for node in subgraph_nodes:
+            node["position"] = [
+                subgraph_x + padding_x + node["position"][0] - local_min_x,
+                subgraph_y + padding_top + node["position"][1] - local_min_y,
+            ]
+        groups.append({
+            "id": graph_id(f"subgraph:{subgraph_id}"),
+            "title": subgraph_name,
+            "position": [subgraph_x, subgraph_y],
+            "size": [group_width, group_height],
+            "subgraph": True,
+        })
+        nodes.extend(subgraph_nodes)
+        append_ui_links(links, subgraph.get("links"), subgraph_nodes, subgraph_aliases, id_prefix)
+        subgraph_y += group_height + 140.0
+
+    return {"kind": "ui", "nodes": nodes, "links": links, "groups": groups}

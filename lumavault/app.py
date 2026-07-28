@@ -20,11 +20,12 @@ from send2trash import send2trash
 
 from . import __version__
 from .metadata import (
+    build_workflow_graph,
     extract_metadata,
     extract_workflow_from_file,
     extract_workflow_nodes,
-    flatten_metadata,
     parse_comfy_metadata,
+    raw_metadata_for_display,
 )
 
 APP_NAME = "LumaVault"
@@ -538,11 +539,11 @@ def create_app(state: VaultState | None = None) -> Flask:
             except Exception:
                 pass
         stat = path.stat()
-        flat = flatten_metadata(raw)
-        raw_display = {key: (value[:20000] + "…" if len(value) > 20000 else value) for key, value in flat.items()}
+        raw_display = raw_metadata_for_display(raw)
         return jsonify({
             "parsed": parsed,
             "workflow_nodes": nodes,
+            "workflow_graph": build_workflow_graph(workflow_obj, workflow_type),
             "raw": raw_display,
             "dimensions": dimensions,
             "file_info": {
