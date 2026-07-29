@@ -581,6 +581,7 @@
     resetZoom();
     const item = currentViewerItem();
     $("#viewer").classList.remove("hidden");
+    document.body.classList.add("viewer-open");
     document.body.style.overflow = "hidden";
     $("#viewerName").textContent = item.name;
     $("#viewerKindBadge").textContent = item.kind.toUpperCase();
@@ -589,6 +590,7 @@
     const favorite = $("#viewerFavoriteBtn");
     favorite.classList.toggle("favorite", item.is_favorite);
     favorite.innerHTML = `${icon("star")}<span>${item.is_favorite ? "Favorited" : "Favorite"}</span>`;
+    $("#copyImageBtn").classList.toggle("hidden", item.kind !== "image");
     renderViewerMedia(item);
     $("#detailsPanel").innerHTML = '<div class="inspector-loading"><div><div class="spinner"></div><p>Reading metadata</p></div></div>';
     $("#nodesPanel").innerHTML = '<div class="inspector-loading">Reading workflow nodes</div>';
@@ -621,9 +623,12 @@
     $("#zoomResetBtn").style.visibility = item.kind === "image" ? "visible" : "hidden";
   }
 
-  function settingCell(label, value, wide = false) {
+  function settingCell(label, value, wide = false, copyValue = null, copySuccess = "Copied") {
     if (value === null || value === undefined || value === "") return "";
-    return `<div class="meta-cell ${wide ? "wide" : ""}"><label>${escapeHtml(label)}</label><span>${escapeHtml(value)}</span></div>`;
+    const copyButton = copyValue === null || copyValue === undefined
+      ? ""
+      : `<button class="meta-copy-button" data-copy-cell="${escapeHtml(copyValue)}" data-copy-success="${escapeHtml(copySuccess)}" title="Copy ${escapeHtml(label)}" aria-label="Copy ${escapeHtml(label)}">${icon("copy")}</button>`;
+    return `<div class="meta-cell ${wide ? "wide" : ""}"><label>${escapeHtml(label)}</label>${copyButton}<span>${escapeHtml(value)}</span></div>`;
   }
 
   function renderMetadata(data, item) {
@@ -632,24 +637,26 @@
     const file = data.file_info || {};
     const promptSection = parsed.prompt || parsed.negative_prompt ? `
       <section class="meta-section">
-        <div class="meta-section-title"><span>Prompts</span>${parsed.prompt ? '<button data-copy-prompt="positive">Copy positive</button>' : ""}</div>
+        <div class="meta-section-title"><span>Prompts</span>${parsed.prompt ? `<button class="meta-copy-button" data-copy-prompt="positive" title="Copy positive prompt" aria-label="Copy positive prompt">${icon("copy")}</button>` : ""}</div>
         ${parsed.prompt ? `<div class="prompt-box">${escapeHtml(parsed.prompt)}</div>` : ""}
-        ${parsed.negative_prompt ? `<div class="meta-section-title"><span>Negative</span><button data-copy-prompt="negative">Copy negative</button></div><div class="prompt-box negative">${escapeHtml(parsed.negative_prompt)}</div>` : ""}
+        ${parsed.negative_prompt ? `<div class="meta-section-title"><span>Negative</span><button class="meta-copy-button" data-copy-prompt="negative" title="Copy negative prompt" aria-label="Copy negative prompt">${icon("copy")}</button></div><div class="prompt-box negative">${escapeHtml(parsed.negative_prompt)}</div>` : ""}
       </section>` : '<section class="meta-section"><div class="meta-section-title"><span>Prompts</span></div><p class="muted-copy">No prompt text was found in this file.</p></section>';
     const loras = Array.isArray(parsed.loras) && parsed.loras.length
-      ? parsed.loras.slice(0, 128).map(lora => `<div class="lora-chip"><strong>${escapeHtml(lora.name)}</strong><span>MODEL ${escapeHtml(lora.strength_model)} · CLIP ${escapeHtml(lora.strength_clip)}</span></div>`).join("")
+      ? parsed.loras.slice(0, 128).map((lora, index) => `<div class="lora-chip"><strong>${escapeHtml(lora.name)}</strong><button class="meta-copy-button" data-copy-lora="${index}" title="Copy LoRA name" aria-label="Copy LoRA name">${icon("copy")}</button><span>MODEL ${escapeHtml(lora.strength_model)} · CLIP ${escapeHtml(lora.strength_clip)}</span></div>`).join("")
       : '<p class="muted-copy">No LoRAs detected.</p>';
     const size = dimensions.width && dimensions.height ? `${dimensions.width} × ${dimensions.height}` : (parsed.width && parsed.height ? `${parsed.width} × ${parsed.height}` : null);
     $("#detailsPanel").innerHTML = `
       ${promptSection}
       <section class="meta-section"><div class="meta-section-title"><span>Generation</span></div><div class="meta-grid">
-        ${settingCell("Model", parsed.model, true)}${settingCell("Seed", parsed.seed)}${settingCell("Steps", parsed.steps)}${settingCell("CFG", parsed.cfg)}${settingCell("Sampler", parsed.sampler)}${settingCell("Scheduler", parsed.scheduler)}${settingCell("Canvas", size)}
+        ${settingCell("Model", parsed.model, true)}${settingCell("Seed", parsed.seed, false, parsed.seed, "Seed copied")}${settingCell("Steps", parsed.steps)}${settingCell("CFG", parsed.cfg)}${settingCell("Sampler", parsed.sampler)}${settingCell("Scheduler", parsed.scheduler)}${settingCell("Canvas", size)}
       </div></section>
       <section class="meta-section"><div class="meta-section-title"><span>LoRAs</span></div>${loras}</section>
       <section class="meta-section"><div class="meta-section-title"><span>File</span><button data-copy-path>Copy path</button></div><div class="meta-grid">
         ${settingCell("Name", item.name, true)}${settingCell("Type", item.kind)}${settingCell("Size", formatBytes(file.size || item.size))}${settingCell("Modified", formatDate(file.modified || item.modified), true)}${settingCell("Location", file.path, true)}
       </div></section>`;
     $$('[data-copy-prompt]', $("#detailsPanel")).forEach(button => button.addEventListener("click", () => copyText(button.dataset.copyPrompt === "negative" ? parsed.negative_prompt : parsed.prompt, "Prompt copied")));
+    $$('[data-copy-cell]', $("#detailsPanel")).forEach(button => button.addEventListener("click", () => copyText(button.dataset.copyCell, button.dataset.copySuccess)));
+    $$('[data-copy-lora]', $("#detailsPanel")).forEach(button => button.addEventListener("click", () => copyText(parsed.loras[Number(button.dataset.copyLora)]?.name, "LoRA name copied")));
     $('[data-copy-path]', $("#detailsPanel"))?.addEventListener("click", () => copyText(file.path, "Path copied"));
     renderNodeList(data.workflow_nodes || []);
     renderWorkflow(data.workflow_graph);
@@ -972,6 +979,7 @@
   function closeViewer() {
     $("#viewer").classList.add("hidden");
     $("#viewer").classList.remove("workflow-view");
+    document.body.classList.remove("viewer-open");
     $("#mediaCanvas").innerHTML = "";
     state.viewerIndex = -1;
     state.metadata = null;
@@ -1069,6 +1077,7 @@
       <button data-action="open-viewer">${icon("image")}Open viewer</button>
       <button data-action="open">${icon("external")}Open externally</button>
       <button data-action="reveal">${icon("folder-open")}Show in Explorer</button>
+      ${item.kind === "image" && !multiple ? `<button data-action="copy-image">${icon("copy")}Copy image</button>` : ""}
       <button data-action="copy">${icon("copy")}${multiple ? `Copy ${targets.length} paths` : "Copy path"}</button><hr>
       <button data-action="favorite">${icon("star")}${item.is_favorite ? "Remove favorite" : "Add favorite"}</button><hr>
       <button class="danger" data-action="delete">${icon("trash")}${multiple ? `Move ${targets.length} items to Recycle Bin` : "Move to Recycle Bin"}</button>`;
@@ -1084,6 +1093,7 @@
       menu.classList.add("hidden");
       if (action === "open-viewer") openViewer(Number(card.dataset.index));
       else if (action === "favorite") toggleFavorite(item, card);
+      else if (action === "copy-image") copyImage(item);
       else if (action === "copy") copyText(targets.map(row => {
         const root = state.sources.find(source => source.id === row.source_id)?.path || "";
         return root ? `${root}\\${row.path.replaceAll("/", "\\")}` : row.path;
@@ -1099,6 +1109,35 @@
     catch (_) {
       const area = document.createElement("textarea"); area.value = String(text); document.body.append(area); area.select(); document.execCommand("copy"); area.remove(); toast(success);
     }
+  }
+
+  async function browserClipboardImage(item) {
+    if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") throw new Error("Image clipboard access is unavailable");
+    const response = await fetch(mediaUrl(item));
+    if (!response.ok) throw new Error("Image could not be loaded");
+    const sourceBlob = await response.blob();
+    let pngBlob = sourceBlob;
+    if (sourceBlob.type !== "image/png") {
+      const bitmap = await createImageBitmap(sourceBlob);
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      canvas.getContext("2d").drawImage(bitmap, 0, 0);
+      bitmap.close();
+      pngBlob = await new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error("Image could not be converted")), "image/png"));
+    }
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": pngBlob })]);
+  }
+
+  async function copyImage(item) {
+    if (!item || item.kind !== "image") return;
+    try {
+      if (window.pywebview?.api?.copy_image) {
+        const result = await window.pywebview.api.copy_image(item.source_id, item.path);
+        if (!result?.success) throw new Error(result?.error || "Image could not be copied");
+      } else await browserClipboardImage(item);
+      toast("Image copied");
+    } catch (error) { toast(error.message || "Image could not be copied", "error"); }
   }
 
   let searchTimer = null;
@@ -1202,6 +1241,7 @@
   $("#viewerPrev").addEventListener("click", () => navigateViewer(-1));
   $("#viewerNext").addEventListener("click", () => navigateViewer(1));
   $("#viewerFavoriteBtn").addEventListener("click", () => toggleFavorite(currentViewerItem()));
+  $("#copyImageBtn").addEventListener("click", () => copyImage(currentViewerItem()));
   $("#revealBtn").addEventListener("click", () => performAction("reveal"));
   $("#openExternalBtn").addEventListener("click", () => performAction("open"));
   $("#deleteBtn").addEventListener("click", () => performAction("delete"));

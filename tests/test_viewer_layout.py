@@ -65,10 +65,29 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn("if (inspectorBody) inspectorBody.scrollTop = 0", JS)
 
     def test_generation_details_show_seed_including_zero(self):
-        self.assertIn('settingCell("Seed", parsed.seed)', JS)
+        self.assertIn('settingCell("Seed", parsed.seed', JS)
         setting_cell = JS[JS.index("function settingCell"):JS.index("function renderMetadata")]
         self.assertIn('value === null || value === undefined || value === ""', setting_cell)
         self.assertNotIn("if (!value)", setting_cell)
+
+    def test_images_can_be_copied_from_context_menu_and_open_viewer(self):
+        self.assertIn('id="copyImageBtn"', INDEX)
+        self.assertIn('title="Copy image"', INDEX)
+        self.assertIn('data-action="copy-image"', JS)
+        self.assertIn("async function copyImage(item)", JS)
+        self.assertIn("window.pywebview.api.copy_image(item.source_id, item.path)", JS)
+        self.assertIn('$("#copyImageBtn").addEventListener("click", () => copyImage(currentViewerItem()))', JS)
+        self.assertIn('else if (action === "copy-image") copyImage(item)', JS)
+        self.assertIn('item.kind === "image"', JS)
+
+    def test_metadata_copy_icons_cover_seed_prompts_and_each_lora(self):
+        self.assertIn('${icon("copy")}', JS)
+        self.assertIn('data-copy-prompt="positive"', JS)
+        self.assertIn('data-copy-prompt="negative"', JS)
+        self.assertIn('settingCell("Seed", parsed.seed, false, parsed.seed, "Seed copied")', JS)
+        self.assertIn('data-copy-lora="${index}"', JS)
+        self.assertIn("LoRA name copied", JS)
+        self.assertIn(".meta-copy-button", CSS)
 
     def test_clicking_outside_rendered_media_closes_the_viewer(self):
         self.assertIn("function isPointOnRenderedMedia(event)", JS)
@@ -156,6 +175,16 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn("body.theme-gloss .meta-cell", glass_css)
         self.assertIn("body.theme-gloss .workflow-canvas { background-color: rgba(7,8,10,.22)", glass_css)
         self.assertNotIn("body.theme-gloss .workflow-canvas { background-color: rgba(7,8,10,.84)", glass_css)
+
+    def test_acrylic_viewer_uniformly_obscures_the_library_beneath_it(self):
+        self.assertIn('document.body.classList.add("viewer-open")', JS)
+        self.assertIn('document.body.classList.remove("viewer-open")', JS)
+        glass_css = CSS[CSS.index("/* Windows Acrylic"):CSS.index("/* CSS zoom")]
+        self.assertIn("body.theme-gloss.viewer-open .app-shell", glass_css)
+        self.assertIn("filter: blur(22px) brightness(.46) saturate(.7)", glass_css)
+        self.assertIn("transform: scale(1.025)", glass_css)
+        self.assertIn("body.theme-gloss.viewer-open .viewer", glass_css)
+        self.assertIn("isolation: isolate", glass_css)
 
     def test_readme_download_name_matches_the_release_version(self):
         self.assertIn('__version__ = "1.0.7"', PACKAGE_INIT)

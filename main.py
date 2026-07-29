@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import io
 import os
 import socket
+import struct
 import threading
 import time
 import webbrowser
 from pathlib import Path
 
 from werkzeug.serving import make_server
+from PIL import Image, ImageOps
 
 from lumavault.app import VaultState, create_app
 
@@ -160,7 +163,89 @@ class ServerThread(threading.Thread):
         self.server.shutdown()
 
 
+def _image_clipboard_payloads(path: Path) -> tuple[bytes, bytes]:
+    """Build a Windows CF_DIB bitmap and CF_HDROP file-list payload."""
+    with Image.open(path) as source:
+        source.seek(0)
+        frame = ImageOps.exif_transpose(source).convert("RGB")
+        output = io.BytesIO()
+        frame.save(output, format="BMP")
+    bitmap = output.getvalue()
+    if len(bitmap) < 15 or not bitmap.startswith(b"BM"):
+        raise ValueError("Image could not be converted for the clipboard.")
+
+    # CF_DIB starts with BITMAPINFOHEADER; the 14-byte BMP file header is omitted.
+    dib = bitmap[14:]
+    absolute_path = str(path.resolve())
+    dropfiles = struct.pack("<IiiII", 20, 0, 0, 0, 1)
+    file_drop = dropfiles + (absolute_path + "\0\0").encode("utf-16-le")
+    return dib, file_drop
+
+
+def _copy_image_to_windows_clipboard(path: Path) -> list[str]:
+    if os.name != "nt":
+        raise OSError("Copy image is supported by the Windows desktop application.")
+
+    from ctypes import wintypes
+
+    cf_dib = 8
+    cf_hdrop = 15
+    gmem_moveable = 0x0002
+    dib, file_drop = _image_clipboard_payloads(path)
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    user32.OpenClipboard.argtypes = [wintypes.HWND]
+    user32.OpenClipboard.restype = wintypes.BOOL
+    user32.EmptyClipboard.restype = wintypes.BOOL
+    user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+    user32.SetClipboardData.restype = wintypes.HANDLE
+    kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+    kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+    kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+    kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+
+    for _ in range(20):
+        if user32.OpenClipboard(None):
+            break
+        time.sleep(0.01)
+    else:
+        raise OSError("The Windows clipboard is busy. Try again.")
+
+    copied_formats: list[str] = []
+    try:
+        if not user32.EmptyClipboard():
+            raise OSError("The Windows clipboard could not be cleared.")
+        for clipboard_format, name, payload in (
+            (cf_dib, "CF_DIB", dib),
+            (cf_hdrop, "CF_HDROP", file_drop),
+        ):
+            handle = kernel32.GlobalAlloc(gmem_moveable, len(payload))
+            if not handle:
+                continue
+            pointer = kernel32.GlobalLock(handle)
+            if not pointer:
+                kernel32.GlobalFree(handle)
+                continue
+            ctypes.memmove(pointer, payload, len(payload))
+            kernel32.GlobalUnlock(handle)
+            if user32.SetClipboardData(clipboard_format, handle):
+                copied_formats.append(name)
+            else:
+                kernel32.GlobalFree(handle)
+        if "CF_DIB" not in copied_formats:
+            raise OSError("The image bitmap could not be placed on the clipboard.")
+        return copied_formats
+    finally:
+        user32.CloseClipboard()
+
+
 class NativeApi:
+    def __init__(self, state: VaultState):
+        self.state = state
+
     def choose_folder(self):
         try:
             import webview
@@ -172,6 +257,17 @@ class NativeApi:
             return result[0] if isinstance(result, (tuple, list)) else result
         except Exception:
             return None
+
+    def copy_image(self, source_id: str, relative_path: str):
+        path = self.state.resolve_file(source_id, relative_path)
+        if path is None or not path.is_file():
+            return {"success": False, "error": "Image not found."}
+        try:
+            formats = _copy_image_to_windows_clipboard(path)
+            return {"success": True, "formats": formats}
+        except Exception as error:
+            message = str(error).strip() or "Image could not be copied."
+            return {"success": False, "error": message}
 
 
 def main() -> int:
@@ -217,7 +313,7 @@ def main() -> int:
     window = webview.create_window(
         "LumaVault",
         url,
-        js_api=NativeApi(),
+        js_api=NativeApi(state),
         width=1500,
         height=920,
         min_size=(980, 640),
