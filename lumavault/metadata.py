@@ -1110,7 +1110,14 @@ def parse_comfy_metadata(metadata):
                     # Prefer the API prompt graph over the UI workflow for sampler settings;
                     # UI widgets include control widgets (for example randomize/fixed) that
                     # shifted position in recent ComfyUI versions.
-                    seed_value = node_inputs.get('seed', node_inputs.get('noise_seed'))
+                    seed_input = node_inputs.get('seed', node_inputs.get('noise_seed'))
+                    if seed_input is None:
+                        seed_input = node_inputs.get('noise')
+                    seed_value = _resolve_api_value(
+                        prompt_graph, seed_input,
+                        ['noise_seed', 'seed', 'value'], 'number',
+                        showtext_snapshots=showtext_snapshots,
+                    )
                     if seed_value is not None:
                         parsed['seed'] = seed_value
                     if node_inputs.get('steps') is not None:

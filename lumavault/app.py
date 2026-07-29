@@ -33,6 +33,10 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".mkv", ".avi"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac"}
 MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
+METADATA_INDEX_VERSION = 1
+SEARCH_FIELDS = {"filename", "prompt", "lora", "model", "all"}
+SEARCH_QUERY_MAX_LENGTH = 500
+SEARCH_TEXT_MAX_LENGTH = 40_000
 
 
 def resource_dir() -> Path:
@@ -83,16 +87,37 @@ def safe_relative(path: Path, root: Path) -> str | None:
         return None
 
 
+def file_generation_metadata(path: Path) -> tuple[dict[str, Any], Any, str | None, dict[str, Any]]:
+    raw: dict[str, Any] = {}
+    if media_kind(path) == "image":
+        raw = extract_metadata(path)
+    workflow_obj, workflow_type = extract_workflow_from_file(path)
+    if workflow_obj:
+        raw["workflow" if workflow_type == "ui" else "prompt"] = workflow_obj
+    return raw, workflow_obj, workflow_type, parse_comfy_metadata(raw)
+
+
 class VaultState:
     def __init__(self, data_dir: Path | None = None, migrate_legacy: bool = True):
         self.data_dir = (data_dir or default_data_dir()).resolve()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.data_dir / "state.json"
         self.thumb_dir = self.data_dir / "thumbnails"
+        self.metadata_index_file = self.data_dir / "metadata-index.json"
         self.thumb_dir.mkdir(parents=True, exist_ok=True)
         self.lock = threading.RLock()
+        self._metadata_lock = threading.RLock()
         self._scan_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self.data = self._load_or_initialize(migrate_legacy)
+        self._metadata_index = self._load_metadata_index()
+
+    def _load_metadata_index(self) -> dict[str, Any]:
+        index = json_read(self.metadata_index_file, None)
+        if not isinstance(index, dict) or index.get("version") != METADATA_INDEX_VERSION:
+            return {"version": METADATA_INDEX_VERSION, "items": {}}
+        if not isinstance(index.get("items"), dict):
+            index["items"] = {}
+        return index
 
     def _default_source_path(self) -> Path:
         candidates = [
@@ -115,6 +140,7 @@ class VaultState:
                 existing["settings"] = settings
             settings.setdefault("card_size", 260)
             settings.setdefault("ui_scale", 1.0)
+            settings.setdefault("theme", "original")
             return existing
 
         default_path = self._default_source_path()
@@ -127,7 +153,7 @@ class VaultState:
                 "recursive": False,
             }],
             "favorites": [],
-            "settings": {"card_size": 260, "ui_scale": 1.0},
+            "settings": {"card_size": 260, "ui_scale": 1.0, "theme": "original"},
             "legacy_migrated": False,
         }
 
@@ -165,22 +191,40 @@ class VaultState:
 
     def settings(self) -> dict[str, Any]:
         with self.lock:
-            return dict(self.data.setdefault("settings", {"card_size": 260, "ui_scale": 1.0}))
+            return dict(self.data.setdefault("settings", {"card_size": 260, "ui_scale": 1.0, "theme": "original"}))
 
     def update_settings(self, values: dict[str, Any]) -> dict[str, Any]:
-        if "ui_scale" not in values:
+        supported = {"ui_scale", "card_size", "theme"}
+        if not supported.intersection(values):
             raise ValueError("No supported setting was provided.")
-        try:
-            ui_scale = float(values["ui_scale"])
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Interface size must be a number.") from exc
-        if not math.isfinite(ui_scale):
-            raise ValueError("Interface size must be a finite number.")
-        ui_scale = min(2.0, max(0.8, round(ui_scale * 20) / 20))
+        updates: dict[str, float | int | str] = {}
+        if "ui_scale" in values:
+            try:
+                ui_scale = float(values["ui_scale"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Interface size must be a number.") from exc
+            if not math.isfinite(ui_scale):
+                raise ValueError("Interface size must be a finite number.")
+            updates["ui_scale"] = min(2.0, max(0.8, round(ui_scale * 20) / 20))
+        if "card_size" in values:
+            try:
+                card_size = float(values["card_size"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Grid size must be a number.") from exc
+            if not math.isfinite(card_size):
+                raise ValueError("Grid size must be a finite number.")
+            updates["card_size"] = min(380, max(190, round(card_size)))
+        if "theme" in values:
+            theme = str(values["theme"]).strip().lower()
+            if theme not in {"original", "gloss"}:
+                raise ValueError("Theme must be original or gloss.")
+            updates["theme"] = theme
         with self.lock:
             settings = self.data.setdefault("settings", {})
-            settings["ui_scale"] = ui_scale
+            settings.update(updates)
+            settings.setdefault("ui_scale", 1.0)
             settings.setdefault("card_size", 260)
+            settings.setdefault("theme", "original")
             self.save()
             return dict(settings)
 
@@ -319,6 +363,7 @@ class VaultState:
                         "source_name": source.get("name"),
                         "size": stat.st_size,
                         "modified": stat.st_mtime,
+                        "_modified_ns": stat.st_mtime_ns,
                         "kind": media_kind(path),
                         "is_favorite": False,
                     })
@@ -326,6 +371,101 @@ class VaultState:
                 continue
         self._scan_cache[source_filter] = (time.monotonic(), rows)
         return [dict(row, is_favorite=self.favorite_key(row["source_id"], row["path"]) in favorites) for row in rows]
+
+    @staticmethod
+    def _bounded_search_text(value: Any, limit: int = SEARCH_TEXT_MAX_LENGTH) -> str:
+        if not isinstance(value, str):
+            return ""
+        return value[:limit].casefold()
+
+    def _extract_search_fields(self, path: Path) -> dict[str, str]:
+        _, _, _, parsed = file_generation_metadata(path)
+        prompt = "\n".join(
+            value for value in (
+                self._bounded_search_text(parsed.get("prompt")),
+                self._bounded_search_text(parsed.get("negative_prompt")),
+            ) if value
+        )[:SEARCH_TEXT_MAX_LENGTH]
+        model = self._bounded_search_text(parsed.get("model"), 2_048)
+        lora_names = []
+        for lora in parsed.get("loras", []) if isinstance(parsed.get("loras"), list) else []:
+            if not isinstance(lora, dict):
+                continue
+            name = self._bounded_search_text(lora.get("name"), 2_048)
+            if name:
+                lora_names.append(name)
+        return {
+            "prompt": prompt,
+            "lora": "\n".join(lora_names)[:SEARCH_TEXT_MAX_LENGTH],
+            "model": model,
+        }
+
+    def searchable_metadata(self, rows: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
+        results: dict[str, dict[str, str]] = {}
+        changed = False
+        with self._metadata_lock:
+            items = self._metadata_index.setdefault("items", {})
+            for row in rows:
+                source_id = str(row.get("source_id", ""))
+                relative_path = str(row.get("path", ""))
+                key = self.favorite_key(source_id, relative_path)
+                signature = {
+                    "size": row.get("size"),
+                    "modified_ns": row.get("_modified_ns"),
+                }
+                cached = items.get(key)
+                if not isinstance(cached, dict) or any(cached.get(name) != value for name, value in signature.items()):
+                    path = self.resolve_file(source_id, relative_path)
+                    if not path or not path.exists() or not path.is_file():
+                        continue
+                    try:
+                        fields = self._extract_search_fields(path)
+                    except Exception:
+                        fields = {"prompt": "", "lora": "", "model": ""}
+                    cached = {"file": str(path.resolve()), **signature, **fields}
+                    items[key] = cached
+                    changed = True
+                results[key] = {
+                    field: cached.get(field, "") if isinstance(cached.get(field, ""), str) else ""
+                    for field in ("prompt", "lora", "model")
+                }
+            if changed:
+                json_write(self.metadata_index_file, self._metadata_index)
+        return results
+
+    def filter_media(self, rows: list[dict[str, Any]], search: str, search_field: str) -> list[dict[str, Any]]:
+        query = search.casefold()
+        if search_field == "filename":
+            return [
+                row for row in rows
+                if query in str(row.get("name", "")).casefold() or query in str(row.get("path", "")).casefold()
+            ]
+        filename_matches: set[str] = set()
+        metadata_rows = rows
+        if search_field == "all":
+            filename_matches = {
+                self.favorite_key(str(row.get("source_id", "")), str(row.get("path", "")))
+                for row in rows
+                if query in str(row.get("name", "")).casefold() or query in str(row.get("path", "")).casefold()
+            }
+            metadata_rows = [
+                row for row in rows
+                if self.favorite_key(str(row.get("source_id", "")), str(row.get("path", ""))) not in filename_matches
+            ]
+        metadata = self.searchable_metadata(metadata_rows)
+        filtered = []
+        for row in rows:
+            key = self.favorite_key(str(row.get("source_id", "")), str(row.get("path", "")))
+            fields = metadata.get(key, {})
+            if search_field == "all":
+                matches = key in filename_matches or any(
+                    query in fields.get(field, "") for field in ("prompt", "lora", "model")
+                )
+            else:
+                matches = query in fields.get(search_field, "")
+            if matches:
+                filtered.append(row)
+        return filtered
 
     def thumbnail_path(self, file_path: Path, width: int = 640) -> Path | None:
         try:
@@ -452,7 +592,10 @@ def create_app(state: VaultState | None = None) -> Flask:
     @app.get("/api/media")
     def list_media():
         source_filter = request.args.get("source", "all")
-        search = request.args.get("search", "").strip().lower()
+        search = request.args.get("search", "").strip()[:SEARCH_QUERY_MAX_LENGTH]
+        search_field = request.args.get("search_field", "filename").strip().lower()
+        if search_field not in SEARCH_FIELDS:
+            return jsonify({"error": "Invalid search field"}), 400
         favorites_only = request.args.get("favorites", "false").lower() == "true"
         kind_filter = request.args.get("kind", "all")
         sort = request.args.get("sort", "date_desc")
@@ -463,12 +606,12 @@ def create_app(state: VaultState | None = None) -> Flask:
             return jsonify({"error": "Invalid pagination"}), 400
 
         rows = state.scan(source_filter)
-        if search:
-            rows = [row for row in rows if search in row["name"].lower() or search in row["path"].lower()]
         if favorites_only:
             rows = [row for row in rows if row["is_favorite"]]
         if kind_filter in {"image", "video", "audio"}:
             rows = [row for row in rows if row["kind"] == kind_filter]
+        if search:
+            rows = state.filter_media(rows, search, search_field)
 
         sorters = {
             "date_desc": (lambda row: row["modified"], True),
@@ -480,7 +623,10 @@ def create_app(state: VaultState | None = None) -> Flask:
         key, reverse = sorters.get(sort, sorters["date_desc"])
         rows.sort(key=key, reverse=reverse)
         start = page * per_page
-        chunk = rows[start:start + per_page]
+        chunk = [
+            {key: value for key, value in row.items() if not key.startswith("_")}
+            for row in rows[start:start + per_page]
+        ]
         return jsonify({
             "items": chunk,
             "total": len(rows),
@@ -521,13 +667,7 @@ def create_app(state: VaultState | None = None) -> Flask:
         if not path or not path.exists() or not path.is_file():
             return jsonify({"error": "File not found"}), 404
         kind = media_kind(path)
-        raw: dict[str, Any] = {}
-        if kind == "image":
-            raw = extract_metadata(path)
-        workflow_obj, workflow_type = extract_workflow_from_file(path)
-        if workflow_obj:
-            raw["workflow" if workflow_type == "ui" else "prompt"] = workflow_obj
-        parsed = parse_comfy_metadata(raw)
+        raw, workflow_obj, workflow_type, parsed = file_generation_metadata(path)
         nodes = extract_workflow_nodes(raw)
         dimensions: dict[str, Any] = {"width": None, "height": None}
         if kind == "image":

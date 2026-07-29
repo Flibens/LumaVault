@@ -43,7 +43,7 @@
         </div>
         <div class="search-box">
           <span data-icon="search"></span>
-          <input id="searchInput" type="search" placeholder="Search files" autocomplete="off">
+          <input id="searchInput" type="search" placeholder="Search file names" autocomplete="off">
           <kbd>Ctrl K</kbd>
         </div>
         <div class="top-actions">
@@ -59,6 +59,16 @@
           <button data-kind="video">Video</button>
           <button data-kind="audio">Audio</button>
         </div>
+        <label class="field-filter" for="searchFieldSelect">
+          <span>Filter by</span>
+          <select id="searchFieldSelect" aria-label="Filter search by">
+            <option value="filename">File name</option>
+            <option value="prompt">Prompt</option>
+            <option value="lora">LoRA</option>
+            <option value="model">Model</option>
+            <option value="all">All fields</option>
+          </select>
+        </label>
         <div class="filter-spacer"></div>
         <div class="range-wrap" title="Thumbnail size">
           <span data-icon="grid-small"></span>
@@ -141,7 +151,12 @@
   <div class="compare-overlay hidden" id="compareOverlay" role="dialog" aria-modal="true">
     <header class="compare-head">
       <div><span class="eyebrow">A / B COMPARISON</span><strong id="compareTitle">Compare</strong></div>
-      <button class="glass-button" id="closeCompareOverlay"><span data-icon="close"></span></button>
+      <div class="compare-head-actions">
+        <button class="glass-button" id="compareZoomOutBtn" title="Zoom out"><span data-icon="minus"></span></button>
+        <button class="glass-button zoom-label" id="compareZoomResetBtn" title="Reset zoom">100%</button>
+        <button class="glass-button" id="compareZoomInBtn" title="Zoom in"><span data-icon="plus"></span></button>
+        <button class="glass-button" id="closeCompareOverlay" title="Close comparison"><span data-icon="close"></span></button>
+      </div>
     </header>
     <div class="compare-stage" id="compareStage">
       <img class="compare-back" id="compareBack" alt="Comparison B">
@@ -149,12 +164,26 @@
       <div class="compare-divider" id="compareDivider"><span><i></i><i></i></span></div>
       <div class="compare-label label-a" id="compareLabelA">A</div>
       <div class="compare-label label-b" id="compareLabelB">B</div>
+      <div class="compare-bottom-hint">Scroll to zoom · drag image to pan · drag divider to compare</div>
     </div>
   </div>
 
   <div class="modal-shell hidden" id="sourcesModal" role="dialog" aria-modal="true">
     <div class="modal-card sources-card">
       <div class="modal-card-head"><div><span class="eyebrow">LUMAVAULT SETTINGS</span><h2>Settings</h2></div><button class="icon-button" id="closeSourcesBtn"><span data-icon="close"></span></button></div>
+      <section class="appearance-setting theme-setting">
+        <div class="setting-copy"><strong>Theme</strong><span>Choose the original dark interface or neutral Windows acrylic with a strongly blurred view of your desktop.</span></div>
+        <div class="theme-options" aria-label="Application theme">
+          <button class="theme-choice active" data-theme-choice="original" aria-pressed="true">
+            <span class="theme-preview theme-preview-original"><i></i><i></i><i></i></span>
+            <span><strong>Original</strong><small>Solid and focused</small></span>
+          </button>
+          <button class="theme-choice" data-theme-choice="gloss" aria-pressed="false">
+            <span class="theme-preview theme-preview-gloss"><i></i><i></i><i></i></span>
+            <span><strong>Acrylic Glass</strong><small>Native Windows blur</small></span>
+          </button>
+        </div>
+      </section>
       <section class="appearance-setting">
         <div class="setting-copy"><strong>Interface size</strong><span>Scale text, buttons, menus, and metadata for your display. Media zoom remains separate.</span></div>
         <output id="uiScaleValue" for="uiScale">100%</output>

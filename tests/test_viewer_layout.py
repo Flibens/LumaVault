@@ -7,6 +7,8 @@ CSS = (ROOT / "lumavault" / "static" / "styles.css").read_text(encoding="utf-8")
 JS = (ROOT / "lumavault" / "static" / "app.js").read_text(encoding="utf-8")
 INDEX = (ROOT / "lumavault" / "static" / "index.html").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
+MAIN = (ROOT / "main.py").read_text(encoding="utf-8")
+PACKAGE_INIT = (ROOT / "lumavault" / "__init__.py").read_text(encoding="utf-8")
 
 
 class ViewerLayoutContractTests(unittest.TestCase):
@@ -28,8 +30,45 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn(".media-canvas video { position: absolute", CSS)
         self.assertIn("max-width: none; max-height: none; object-fit: contain", CSS)
 
+    def test_compare_view_has_synchronized_zoom_controls(self):
+        self.assertIn('id="compareZoomOutBtn"', INDEX)
+        self.assertIn('id="compareZoomResetBtn"', INDEX)
+        self.assertIn('id="compareZoomInBtn"', INDEX)
+        self.assertIn("function setCompareZoom", JS)
+        self.assertIn("function resetCompareView", JS)
+        self.assertIn('[front, back].forEach(image => {', JS)
+        self.assertIn("scale(${state.compareZoom})", JS)
+        self.assertIn('$("#compareStage").addEventListener("wheel"', JS)
+        self.assertIn("resetCompareView();", JS[JS.index("function openCompare"):JS.index("function syncCompareGeometry")])
+
+    def test_zoomed_compare_can_pan_without_disabling_the_divider(self):
+        self.assertIn("comparePanX: 0, comparePanY: 0", JS)
+        self.assertIn("function clampComparePan()", JS)
+        self.assertIn("translate(${state.comparePanX}px, ${state.comparePanY}px)", JS)
+        self.assertIn('event.target.closest("#compareDivider")', JS)
+        self.assertIn("state.comparePanning = true", JS)
+        self.assertIn('stage.addEventListener("pointermove", move)', JS)
+        self.assertIn("state.comparePanX = 0", JS[JS.index("function resetCompareView"):JS.index("function syncCompareGeometry")])
+        self.assertIn(".compare-stage.zoomed", CSS)
+        self.assertIn("touch-action: none", CSS)
+        self.assertIn("Scroll to zoom · drag image to pan · drag divider to compare", INDEX)
+
+    def test_compare_pointer_math_respects_interface_scaling(self):
+        self.assertIn("function comparePointerPosition(clientX, clientY)", JS)
+        self.assertIn("stage.clientWidth / rect.width", JS)
+        self.assertIn("stage.clientHeight / rect.height", JS)
+        self.assertIn("position.x / stage.clientWidth * 100", JS)
+        self.assertIn("ev.clientX - state.comparePanStart.x", JS)
+        self.assertIn("* position.scaleX", JS)
+
     def test_switching_inspector_tabs_starts_at_top(self):
         self.assertIn("if (inspectorBody) inspectorBody.scrollTop = 0", JS)
+
+    def test_generation_details_show_seed_including_zero(self):
+        self.assertIn('settingCell("Seed", parsed.seed)', JS)
+        setting_cell = JS[JS.index("function settingCell"):JS.index("function renderMetadata")]
+        self.assertIn('value === null || value === undefined || value === ""', setting_cell)
+        self.assertNotIn("if (!value)", setting_cell)
 
     def test_clicking_outside_rendered_media_closes_the_viewer(self):
         self.assertIn("function isPointOnRenderedMedia(event)", JS)
@@ -83,9 +122,30 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn('$("#nodesPanel").innerHTML = \'<div class="inspector-loading">Reading workflow nodes</div>\'', JS)
         self.assertIn('$("#nodesPanel").innerHTML = \'<p class="muted-copy">No workflow nodes available.</p>\'', JS)
 
+    def test_desktop_window_allows_wallpaper_behind_gloss_theme(self):
+        create_window = MAIN[MAIN.index("window = webview.create_window("):MAIN.index("try:", MAIN.index("window = webview.create_window("))]
+        self.assertIn("transparent=True", create_window)
+
+    def test_glass_theme_uses_native_windows_acrylic_and_neutral_materials(self):
+        self.assertIn("DWMWA_SYSTEMBACKDROP_TYPE = 38", MAIN)
+        self.assertIn("DWMSBT_TRANSIENTWINDOW = 3", MAIN)
+        self.assertIn("DwmExtendFrameIntoClientArea", MAIN)
+        self.assertIn("Margins(-1, -1, -1, -1)", MAIN)
+        self.assertIn("SetWindowCompositionAttribute", MAIN)
+        self.assertIn("func=apply_windows_acrylic", MAIN)
+        self.assertIn("Acrylic Glass", INDEX)
+        self.assertIn("Native Windows blur", INDEX)
+        glass_css = CSS[CSS.index("/* Windows Acrylic"):CSS.index("/* CSS zoom")]
+        self.assertIn("rgba(18,19,22,.24)", glass_css)
+        self.assertIn("body.theme-gloss .content { background: rgba(8,9,11,.06); }", glass_css)
+        self.assertNotIn("rgba(8,9,11,.52)", glass_css)
+        self.assertNotIn("126,103,255", glass_css)
+        self.assertNotIn("119,114,255", glass_css)
+
     def test_readme_download_name_matches_the_release_version(self):
-        self.assertIn("LumaVault-1.0.5-Windows.zip", README)
-        self.assertNotIn("LumaVault-1.0.4-Windows.zip", README)
+        self.assertIn('__version__ = "1.0.7"', PACKAGE_INIT)
+        self.assertIn("LumaVault-1.0.7-Windows.zip", README)
+        self.assertNotIn("LumaVault-1.0.6-Windows.zip", README)
 
     def test_workflow_long_text_values_wrap_and_scroll_without_visual_truncation(self):
         self.assertIn('param.multiline ? "multiline" : ""', JS)

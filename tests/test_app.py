@@ -1,5 +1,6 @@
 import json
 import math
+import os
 import tempfile
 import time
 import unittest
@@ -116,6 +117,77 @@ class LumaVaultAppTests(unittest.TestCase):
         self.assertEqual(payload["items"][0]["name"], "sample.png")
         self.assertEqual(payload["items"][0]["kind"], "image")
 
+    def test_gallery_can_filter_by_prompt_lora_model_and_all_metadata(self):
+        cases = [
+            ("prompt", "glass city", 1),
+            ("prompt", "LOW QUALITY", 1),
+            ("lora", "cinematic", 1),
+            ("model", "AURORA", 1),
+            ("all", "blue hour", 1),
+            ("all", "sample.png", 1),
+            ("filename", "glass city", 0),
+            ("prompt", "not present", 0),
+        ]
+        for search_field, search, expected in cases:
+            with self.subTest(search_field=search_field, search=search):
+                response = self.client.get("/api/media", query_string={
+                    "source": "test",
+                    "search_field": search_field,
+                    "search": search,
+                    "page": 0,
+                    "per_page": 20,
+                })
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_json()["total"], expected)
+
+        invalid = self.client.get("/api/media?source=test&search_field=raw&search=glass")
+        self.assertEqual(invalid.status_code, 400)
+
+    def test_metadata_search_index_is_persistent_and_reused(self):
+        first = self.client.get("/api/media?source=test&search_field=prompt&search=glass")
+        self.assertEqual(first.get_json()["total"], 1)
+        self.assertTrue((self.data / "metadata-index.json").is_file())
+
+        reloaded = VaultState(self.data, migrate_legacy=False)
+        reloaded_client = create_app(reloaded).test_client()
+        with mock.patch("lumavault.app.extract_metadata", side_effect=AssertionError("cache was not reused")):
+            second = reloaded_client.get("/api/media?source=test&search_field=model&search=aurora")
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.get_json()["total"], 1)
+
+    def test_cached_metadata_search_does_not_touch_every_media_file_again(self):
+        rows = self.state.scan("test")
+        first = self.state.filter_media(rows, "glass", "prompt")
+        self.assertEqual(len(first), 1)
+
+        with mock.patch.object(
+            self.state,
+            "resolve_file",
+            side_effect=AssertionError("cached search resolved a media path"),
+        ):
+            second = self.state.filter_media(rows, "glass", "prompt")
+
+        self.assertEqual(len(second), 1)
+
+    def test_metadata_search_index_refreshes_when_a_file_changes(self):
+        first = self.client.get("/api/media?source=test&search_field=prompt&search=glass")
+        self.assertEqual(first.get_json()["total"], 1)
+
+        path = self.media / "sample.png"
+        previous_mtime_ns = path.stat().st_mtime_ns
+        replacement = PngInfo()
+        replacement.add_text("prompt", json.dumps({
+            "1": {"class_type": "CLIPTextEncode", "inputs": {"text": "a copper forest at dawn"}},
+        }))
+        Image.new("RGB", (768, 1024), (120, 80, 60)).save(path, pnginfo=replacement)
+        os.utime(path, ns=(previous_mtime_ns + 1_000_000, previous_mtime_ns + 1_000_000))
+        self.state.clear_scan_cache()
+
+        old = self.client.get("/api/media?source=test&search_field=prompt&search=glass").get_json()
+        new = self.client.get("/api/media?source=test&search_field=prompt&search=copper").get_json()
+        self.assertEqual(old["total"], 0)
+        self.assertEqual(new["total"], 1)
+
     def test_metadata_and_subgraph_workflow(self):
         response = self.client.get("/api/metadata?source=test&path=sample.png")
         self.assertEqual(response.status_code, 200)
@@ -130,6 +202,26 @@ class LumaVaultAppTests(unittest.TestCase):
         self.assertTrue(any(node["id"] == "sg1:22" for node in payload["workflow_nodes"]))
         self.assertEqual(payload["raw"]["prompt"]["2"]["inputs"]["text"], "a glass city at blue hour")
         self.assertEqual(payload["raw"]["workflow"]["nodes"][0]["id"], 1)
+
+    def test_sampler_custom_resolves_seed_from_linked_random_noise(self):
+        for value, expected in [(918273645, 918273645), ("4815162342", 4815162342), (0, 0)]:
+            with self.subTest(value=value):
+                prompt = {
+                    "noise": {"class_type": "RandomNoise", "inputs": {"noise_seed": value}},
+                    "sampler": {
+                        "class_type": "SamplerCustomAdvanced",
+                        "inputs": {"noise": ["noise", 0]},
+                    },
+                }
+
+                parsed = parse_comfy_metadata({"prompt": prompt})
+
+                self.assertEqual(parsed["seed"], expected)
+
+        missing = parse_comfy_metadata({
+            "prompt": {"sampler": {"class_type": "SamplerCustomAdvanced", "inputs": {}}},
+        })
+        self.assertIsNone(missing["seed"])
 
     def test_raw_display_prioritizes_prompt_and_workflow_after_generic_metadata(self):
         metadata = {f"generic-{index}": "value" for index in range(256)}
@@ -586,6 +678,36 @@ class LumaVaultAppTests(unittest.TestCase):
         reloaded = VaultState(self.data, migrate_legacy=False)
         self.assertEqual(reloaded.data["settings"]["ui_scale"], 1.75)
         self.assertEqual(self.client.patch("/api/settings", json={"ui_scale": "huge"}).status_code, 400)
+
+    def test_grid_size_setting_is_saved_to_application_state(self):
+        response = self.client.patch("/api/settings", json={"card_size": 315})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["settings"]["card_size"], 315)
+        self.assertEqual(self.client.get("/api/sources").get_json()["settings"]["card_size"], 315)
+
+        reloaded = VaultState(self.data, migrate_legacy=False)
+        self.assertEqual(reloaded.data["settings"]["card_size"], 315)
+        self.assertEqual(self.client.patch("/api/settings", json={"card_size": "huge"}).status_code, 400)
+        self.assertEqual(self.client.patch("/api/settings", json={"card_size": float("inf")}).status_code, 400)
+
+    def test_grid_size_setting_is_clamped_to_slider_bounds(self):
+        small = self.client.patch("/api/settings", json={"card_size": 1}).get_json()
+        large = self.client.patch("/api/settings", json={"card_size": 10_000}).get_json()
+        self.assertEqual(small["settings"]["card_size"], 190)
+        self.assertEqual(large["settings"]["card_size"], 380)
+
+    def test_theme_setting_is_saved_to_application_state(self):
+        self.assertEqual(self.client.get("/api/sources").get_json()["settings"]["theme"], "original")
+        response = self.client.patch("/api/settings", json={"theme": "gloss"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["settings"]["theme"], "gloss")
+        reloaded = VaultState(self.data, migrate_legacy=False)
+        self.assertEqual(reloaded.data["settings"]["theme"], "gloss")
+
+    def test_theme_setting_rejects_unknown_theme(self):
+        response = self.client.patch("/api/settings", json={"theme": "neon"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.state.settings()["theme"], "original")
 
     def test_lora_manager_structured_widget_excludes_inactive_inventory(self):
         metadata = {

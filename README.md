@@ -31,12 +31,13 @@ A polished, standalone Windows media browser for ComfyUI outputs and other creat
 - A/B image comparison slider
 - Explorer reveal, external open, and safe deletion through the Windows Recycle Bin
 - Persistent **80%–200% interface scaling** for 4K and high-DPI monitors
+- Switchable **Original** and **Acrylic Glass** themes with native Windows wallpaper blur
 - Responsive compact layout at large UI scales or narrow window sizes
 - Local-only backend bound to `127.0.0.1`
 
 ## Windows download
 
-Download `LumaVault-1.0.5-Windows.zip` from the [latest release](https://github.com/Flibens/LumaVault/releases/latest), extract it, and run:
+Download `LumaVault-1.0.7-Windows.zip` from the [latest release](https://github.com/Flibens/LumaVault/releases/latest), extract it, and run:
 
 ```text
 LumaVault\LumaVault.exe

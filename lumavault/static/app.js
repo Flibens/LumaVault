@@ -35,15 +35,17 @@
   const NODE_LIST_DOM_BUDGET = 20000;
   const NODE_LIST_MAX_CARDS = 2000;
   let uiScaleSaveTimer = null;
+  let cardSizeSaveTimer = null;
 
   $$('[data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); });
 
   const state = {
-    sources: [], source: "all", page: 0, hasMore: false, loading: false,
-    search: "", sort: "date_desc", kind: "all", favorites: false,
+    sources: [], source: "all", page: 0, hasMore: false, loading: false, reloadQueued: false,
+    search: "", searchField: "filename", sort: "date_desc", kind: "all", favorites: false,
     items: [], total: 0, compareMode: false, compareItems: [], selectedKeys: new Set(),
+    compareZoom: 1, comparePanX: 0, comparePanY: 0, comparePanning: false, comparePanStart: null,
     viewerIndex: -1, metadata: null, dataDir: "", zoom: 1, panX: 0, panY: 0,
-    panning: false, panStart: null, requestToken: 0, uiScale: 1, workflowView: null
+    panning: false, panStart: null, requestToken: 0, uiScale: 1, cardSize: 260, theme: "original", workflowView: null
   };
 
   const gallery = $("#gallery");
@@ -79,6 +81,48 @@
         body: JSON.stringify({ ui_scale: scale })
       }).catch(error => toast(`Interface size could not be saved: ${error.message}`, "error"));
     }, 250);
+  }
+
+  function applyCardSize(size, persist = true) {
+    const numeric = Number(size);
+    const next = Number.isFinite(numeric) ? Math.min(380, Math.max(190, Math.round(numeric))) : 260;
+    state.cardSize = next;
+    document.documentElement.style.setProperty("--card-size", `${next}px`);
+    const slider = $("#cardSize");
+    if (slider) slider.value = String(next);
+    if (persist) {
+      clearTimeout(cardSizeSaveTimer);
+      cardSizeSaveTimer = setTimeout(() => {
+        api("/api/settings", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ card_size: size })
+        }).catch(error => toast(`Grid size could not be saved: ${error.message}`, "error"));
+      }, 250);
+    }
+  }
+
+  function syncNativeWindowClass() {
+    document.documentElement.classList.toggle("native-window", Boolean(window.pywebview?.api));
+  }
+
+  function applyTheme(theme, persist = true) {
+    const next = theme === "gloss" ? "gloss" : "original";
+    state.theme = next;
+    document.documentElement.dataset.theme = next;
+    document.body.classList.toggle("theme-gloss", next === "gloss");
+    $$('[data-theme-choice]').forEach(button => {
+      const active = button.dataset.themeChoice === next;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+    if (persist) {
+      api("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ theme: next })
+      }).catch(error => toast(`Theme could not be saved: ${error.message}`, "error"));
+    }
   }
 
   function syncUiScaleBreakpoints() {
@@ -141,6 +185,9 @@
       applyUiScale(savedScale, false);
       try { localStorage.setItem(UI_SCALE_KEY, String(state.uiScale)); } catch (_) { /* local storage can be unavailable */ }
     }
+    const savedCardSize = Number(data.settings?.card_size);
+    if (Number.isFinite(savedCardSize)) applyCardSize(savedCardSize, false);
+    applyTheme(data.settings?.theme, false);
     if (state.source !== "all" && !state.sources.some(source => source.id === state.source)) state.source = "all";
     renderSources();
     renderSourcesManager();
@@ -217,7 +264,10 @@
   }
 
   async function loadMedia(reset = false) {
-    if (state.loading) return;
+    if (state.loading) {
+      if (reset) state.reloadQueued = true;
+      return;
+    }
     if (!reset && !state.hasMore) return;
     if (reset) {
       state.page = 0;
@@ -230,13 +280,17 @@
     const token = ++state.requestToken;
     loadMore.classList.remove("hidden");
     emptyState.classList.add("hidden");
+    if (reset && state.search && state.searchField !== "filename") {
+      const labels = { prompt: "prompts", lora: "LoRAs", model: "models", all: "metadata" };
+      $("#resultCount").textContent = `Searching ${labels[state.searchField] || "metadata"}…`;
+    }
     try {
       const url = queryUrl("/api/media", {
-        source: state.source, search: state.search, favorites: state.favorites,
+        source: state.source, search: state.search, search_field: state.searchField, favorites: state.favorites,
         kind: state.kind, sort: state.sort, page: state.page, per_page: 80
       });
       const data = await api(url);
-      if (token !== state.requestToken) return;
+      if (token !== state.requestToken || state.reloadQueued) return;
       const startIndex = state.items.length;
       state.items.push(...(data.items || []));
       state.total = data.total || 0;
@@ -246,7 +300,7 @@
       updateSummary();
       emptyState.classList.toggle("hidden", state.total !== 0);
     } catch (error) {
-      if (token === state.requestToken) {
+      if (token === state.requestToken && !state.reloadQueued) {
         gallery.innerHTML = `<div class="muted-copy">Could not load the library: ${escapeHtml(error.message)}</div>`;
         toast(error.message, "error");
       }
@@ -254,6 +308,10 @@
       if (token === state.requestToken) {
         state.loading = false;
         loadMore.classList.toggle("hidden", !state.hasMore);
+        if (state.reloadQueued) {
+          state.reloadQueued = false;
+          loadMedia(true);
+        }
       }
     }
   }
@@ -421,8 +479,74 @@
     $("#compareLabelB").textContent = `B · ${b.name}`;
     $("#compareTitle").textContent = `${a.name}  /  ${b.name}`;
     $("#compareOverlay").classList.remove("hidden");
+    resetCompareView();
     updateCompareSlider(50);
     requestAnimationFrame(syncCompareGeometry);
+  }
+
+  function clampComparePan() {
+    const stage = $("#compareStage");
+    if (!stage || state.compareZoom <= 1) {
+      state.comparePanX = 0;
+      state.comparePanY = 0;
+      return;
+    }
+    const maxX = stage.clientWidth * (state.compareZoom - 1) / 2;
+    const maxY = stage.clientHeight * (state.compareZoom - 1) / 2;
+    state.comparePanX = Math.max(-maxX, Math.min(maxX, state.comparePanX));
+    state.comparePanY = Math.max(-maxY, Math.min(maxY, state.comparePanY));
+  }
+
+  function applyCompareTransform() {
+    const front = $("#compareFront");
+    const back = $("#compareBack");
+    if (!front || !back) return;
+    clampComparePan();
+    [front, back].forEach(image => {
+      image.style.transform = `translate(${state.comparePanX}px, ${state.comparePanY}px) scale(${state.compareZoom})`;
+    });
+    $("#compareZoomResetBtn").textContent = `${Math.round(state.compareZoom * 100)}%`;
+    const stage = $("#compareStage");
+    stage.classList.toggle("zoomed", state.compareZoom > 1);
+    stage.classList.toggle("panning", state.comparePanning);
+  }
+
+  function comparePointerPosition(clientX, clientY) {
+    const stage = $("#compareStage");
+    const rect = stage.getBoundingClientRect();
+    const scaleX = rect.width ? stage.clientWidth / rect.width : 1;
+    const scaleY = rect.height ? stage.clientHeight / rect.height : 1;
+    return {
+      x: (clientX - rect.left) * scaleX,
+      y: (clientY - rect.top) * scaleY,
+      scaleX, scaleY
+    };
+  }
+
+  function setCompareZoom(value, clientX = null, clientY = null) {
+    const previous = state.compareZoom;
+    const next = Math.max(1, Math.min(8, value));
+    const stage = $("#compareStage");
+    if (stage && next > 1 && clientX !== null && clientY !== null) {
+      const position = comparePointerPosition(clientX, clientY);
+      const pointX = position.x - stage.clientWidth / 2;
+      const pointY = position.y - stage.clientHeight / 2;
+      const worldX = (pointX - state.comparePanX) / previous;
+      const worldY = (pointY - state.comparePanY) / previous;
+      state.comparePanX = pointX - worldX * next;
+      state.comparePanY = pointY - worldY * next;
+    }
+    state.compareZoom = next;
+    applyCompareTransform();
+  }
+
+  function resetCompareView() {
+    state.compareZoom = 1;
+    state.comparePanX = 0;
+    state.comparePanY = 0;
+    state.comparePanning = false;
+    state.comparePanStart = null;
+    applyCompareTransform();
   }
 
   function syncCompareGeometry() {
@@ -437,9 +561,9 @@
       image.style.maxHeight = "none";
       image.style.left = "0";
       image.style.top = "0";
-      image.style.transform = "none";
       image.style.objectFit = "contain";
     });
+    applyCompareTransform();
   }
 
   function updateCompareSlider(percent) {
@@ -982,8 +1106,14 @@
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => { state.search = event.target.value.trim(); loadMedia(true); }, 220);
   });
+  $("#searchFieldSelect").addEventListener("change", event => {
+    state.searchField = event.target.value;
+    const labels = { filename: "file names", prompt: "prompts", lora: "LoRAs", model: "models", all: "all fields" };
+    $("#searchInput").placeholder = `Search ${labels[state.searchField] || "files"}`;
+    if (state.search) loadMedia(true);
+  });
   $("#sortSelect").addEventListener("change", event => { state.sort = event.target.value; loadMedia(true); });
-  $("#cardSize").addEventListener("input", event => document.documentElement.style.setProperty("--card-size", `${event.target.value}px`));
+  $("#cardSize").addEventListener("input", event => applyCardSize(event.target.value));
   $$("#kindFilter button").forEach(button => button.addEventListener("click", () => {
     state.kind = button.dataset.kind;
     $$("#kindFilter button").forEach(row => row.classList.toggle("active", row === button));
@@ -1001,11 +1131,53 @@
   $("#clearCompareBtn").addEventListener("click", clearCompare);
   $("#openCompareBtn").addEventListener("click", openCompare);
   $("#closeCompareOverlay").addEventListener("click", () => $("#compareOverlay").classList.add("hidden"));
+  $("#compareZoomOutBtn").addEventListener("click", () => setCompareZoom(state.compareZoom - .25));
+  $("#compareZoomInBtn").addEventListener("click", () => setCompareZoom(state.compareZoom + .25));
+  $("#compareZoomResetBtn").addEventListener("click", resetCompareView);
+  $("#compareStage").addEventListener("wheel", event => {
+    event.preventDefault();
+    setCompareZoom(state.compareZoom + (event.deltaY < 0 ? .2 : -.2), event.clientX, event.clientY);
+  }, { passive: false });
   $("#compareStage").addEventListener("pointerdown", event => {
+    if (event.button !== 0) return;
     const stage = event.currentTarget;
-    const move = ev => updateCompareSlider((ev.clientX - stage.getBoundingClientRect().left) / stage.clientWidth * 100);
-    move(event); stage.setPointerCapture(event.pointerId); stage.addEventListener("pointermove", move);
-    stage.addEventListener("pointerup", () => stage.removeEventListener("pointermove", move), { once: true });
+    const dividerDrag = !!event.target.closest("#compareDivider");
+    let move;
+    if (state.compareZoom > 1 && !dividerDrag) {
+      state.comparePanning = true;
+      state.comparePanStart = {
+        pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+        panX: state.comparePanX, panY: state.comparePanY
+      };
+      move = ev => {
+        if (!state.comparePanStart || ev.pointerId !== state.comparePanStart.pointerId) return;
+        const position = comparePointerPosition(ev.clientX, ev.clientY);
+        state.comparePanX = state.comparePanStart.panX + (ev.clientX - state.comparePanStart.x) * position.scaleX;
+        state.comparePanY = state.comparePanStart.panY + (ev.clientY - state.comparePanStart.y) * position.scaleY;
+        applyCompareTransform();
+      };
+      applyCompareTransform();
+    } else {
+      move = ev => {
+        const position = comparePointerPosition(ev.clientX, ev.clientY);
+        updateCompareSlider(position.x / stage.clientWidth * 100);
+      };
+      move(event);
+    }
+    const end = ev => {
+      if (ev.pointerId !== event.pointerId) return;
+      state.comparePanning = false;
+      state.comparePanStart = null;
+      stage.removeEventListener("pointermove", move);
+      stage.removeEventListener("pointerup", end);
+      stage.removeEventListener("pointercancel", end);
+      applyCompareTransform();
+    };
+    stage.setPointerCapture(event.pointerId);
+    stage.addEventListener("pointermove", move);
+    stage.addEventListener("pointerup", end);
+    stage.addEventListener("pointercancel", end);
+    event.preventDefault();
   });
   $("#compareFront").addEventListener("load", syncCompareGeometry);
   $("#compareBack").addEventListener("load", syncCompareGeometry);
@@ -1020,7 +1192,9 @@
   $("#mobileMenuBtn").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
   $("#uiScale").addEventListener("input", event => applyUiScale(Number(event.target.value) / 100));
   $$("[data-ui-scale]").forEach(button => button.addEventListener("click", () => applyUiScale(Number(button.dataset.uiScale))));
+  $$('[data-theme-choice]').forEach(button => button.addEventListener("click", () => applyTheme(button.dataset.themeChoice)));
   window.addEventListener("resize", syncUiScaleBreakpoints);
+  window.addEventListener("pywebviewready", syncNativeWindowClass);
 
   $("#closeViewerBtn").addEventListener("click", closeViewer);
   $("#workflowCloseBtn").addEventListener("click", closeViewer);
@@ -1073,6 +1247,7 @@
     }
   }
 
+  syncNativeWindowClass();
   applyUiScale(storedUiScale(), false);
   initialize();
 })();
