@@ -394,6 +394,13 @@ html[data-theme="gloss"]:not(.native-window) {
 }
 html[data-theme="gloss"].native-window,
 html[data-theme="gloss"].native-window body { background: transparent; }
+body.theme-gloss {
+  --text-2: #d9dce2;
+  --muted: #bbc0ca;
+  --faint: #959ca8;
+  --line: rgba(255,255,255,.12);
+  --line-strong: rgba(255,255,255,.2);
+}
 body.theme-gloss .app-shell {
   background: linear-gradient(135deg, rgba(18,19,22,.24), rgba(8,9,11,.17) 54%, rgba(18,19,22,.22));
   backdrop-filter: blur(38px) saturate(108%);
@@ -404,6 +411,15 @@ body.theme-gloss .sidebar { background: linear-gradient(180deg, rgba(24,25,28,.3
 body.theme-gloss .topbar { background: linear-gradient(100deg, rgba(24,25,28,.31), rgba(10,11,13,.23)); border-bottom-color: rgba(255,255,255,.14); backdrop-filter: blur(38px) saturate(108%); box-shadow: inset 0 1px rgba(255,255,255,.09); }
 body.theme-gloss .filterbar { background: rgba(12,13,15,.24); border-bottom-color: rgba(255,255,255,.12); backdrop-filter: blur(34px) saturate(106%); }
 body.theme-gloss .content { background: rgba(8,9,11,.06); }
+body.theme-gloss .summary-row {
+  color: rgba(244,246,250,.84);
+  font-weight: 500;
+  text-shadow: 0 1px 3px rgba(0,0,0,.88);
+}
+body.theme-gloss .title-block p,
+body.theme-gloss .brand small,
+body.theme-gloss .sidebar-footer small,
+body.theme-gloss .card-meta { text-shadow: 0 1px 2px rgba(0,0,0,.72); }
 body.theme-gloss .search-box,
 body.theme-gloss .segmented,
 body.theme-gloss select { background-color: rgba(255,255,255,.055); border-color: rgba(255,255,255,.14); box-shadow: inset 0 1px rgba(255,255,255,.055); backdrop-filter: blur(24px) saturate(108%); }
@@ -418,17 +434,34 @@ body.theme-gloss .modal-card { background: linear-gradient(145deg, rgba(39,40,45
 body.theme-gloss .appearance-setting { background: linear-gradient(135deg, rgba(255,255,255,.055), rgba(255,255,255,.012) 56%, transparent); }
 body.theme-gloss .theme-choice { background: rgba(255,255,255,.045); border-color: rgba(255,255,255,.13); }
 body.theme-gloss .theme-choice.active { background: linear-gradient(145deg, rgba(255,255,255,.13), rgba(255,255,255,.045)); border-color: rgba(255,255,255,.4); box-shadow: inset 0 1px rgba(255,255,255,.15), 0 10px 28px rgba(0,0,0,.16); }
-body.theme-gloss .viewer { background: rgba(5,6,8,.78); backdrop-filter: blur(30px) saturate(108%); }
-body.theme-gloss .viewer-stage { background-color: rgba(6,7,9,.82); }
-body.theme-gloss .inspector,
-body.theme-gloss .inspector-head { background: rgba(19,20,23,.76); backdrop-filter: blur(34px) saturate(108%); }
-body.theme-gloss .workflow-search { background: rgba(17,18,21,.86); }
-body.theme-gloss .workflow-graph,
-body.theme-gloss .workflow-canvas { background-color: rgba(7,8,10,.84); }
-body.theme-gloss .workflow-toolbar { background: linear-gradient(180deg, rgba(36,37,42,.84), rgba(15,16,19,.8)); backdrop-filter: blur(30px); }
-body.theme-gloss .compare-overlay { background: rgba(5,6,8,.82); backdrop-filter: blur(30px) saturate(108%); }
-body.theme-gloss .compare-head { background: rgba(19,20,23,.66); backdrop-filter: blur(30px); }
-body.theme-gloss .compare-stage { background: rgba(7,8,10,.78); border-color: rgba(255,255,255,.14); box-shadow: inset 0 1px rgba(255,255,255,.065); }
+body.theme-gloss .viewer { background: rgba(5,6,8,.12); backdrop-filter: blur(44px) saturate(106%); }
+body.theme-gloss .viewer-stage { background-color: rgba(6,7,9,.2); }
+body.theme-gloss .viewer-top { background: linear-gradient(180deg, rgba(8,9,11,.48), rgba(8,9,11,.16) 66%, transparent); }
+body.theme-gloss .glass-button,
+body.theme-gloss .viewer-nav { background: rgba(16,17,20,.38); border-color: rgba(255,255,255,.18); backdrop-filter: blur(22px) saturate(106%); }
+body.theme-gloss .viewer-bottom-hint,
+body.theme-gloss .workflow-help { color: rgba(245,247,250,.66); text-shadow: 0 1px 3px rgba(0,0,0,.9); }
+body.theme-gloss .inspector { background: rgba(16,17,20,.5); border-left-color: rgba(255,255,255,.18); backdrop-filter: blur(40px) saturate(106%); }
+body.theme-gloss .inspector-head { background: rgba(20,21,24,.34); backdrop-filter: blur(34px) saturate(106%); }
+body.theme-gloss .inspector-actions { background: linear-gradient(120deg, rgba(255,255,255,.035), transparent 55%); }
+body.theme-gloss .prompt-box,
+body.theme-gloss .raw-box,
+body.theme-gloss .meta-cell,
+body.theme-gloss .node-card { background: rgba(255,255,255,.065); border-color: rgba(255,255,255,.14); box-shadow: inset 0 1px rgba(255,255,255,.035); }
+body.theme-gloss .meta-cell label,
+body.theme-gloss .meta-section-title,
+body.theme-gloss .tabs button,
+body.theme-gloss .muted-copy { text-shadow: 0 1px 2px rgba(0,0,0,.8); }
+body.theme-gloss .workflow-search { background: rgba(16,17,20,.46); backdrop-filter: blur(28px); }
+body.theme-gloss .viewer.workflow-view .inspector { background: rgba(10,11,13,.3); }
+body.theme-gloss .workflow-graph { background: rgba(7,8,10,.12); }
+body.theme-gloss .workflow-canvas { background-color: rgba(7,8,10,.22); }
+body.theme-gloss .workflow-toolbar { background: linear-gradient(180deg, rgba(34,35,40,.42), rgba(12,13,16,.28)); backdrop-filter: blur(32px) saturate(106%); }
+body.theme-gloss .workflow-summary strong,
+body.theme-gloss .workflow-controls output { color: #aeb4bf; text-shadow: 0 1px 2px rgba(0,0,0,.82); }
+body.theme-gloss .compare-overlay { background: rgba(5,6,8,.16); backdrop-filter: blur(42px) saturate(106%); }
+body.theme-gloss .compare-head { background: rgba(19,20,23,.36); backdrop-filter: blur(30px); }
+body.theme-gloss .compare-stage { background: rgba(7,8,10,.28); border-color: rgba(255,255,255,.16); box-shadow: inset 0 1px rgba(255,255,255,.075); }
 
 /* CSS zoom does not change media-query width. These classes make responsive
    layout decisions using the effective width after interface scaling. */

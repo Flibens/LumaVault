@@ -142,6 +142,21 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertNotIn("126,103,255", glass_css)
         self.assertNotIn("119,114,255", glass_css)
 
+    def test_acrylic_theme_keeps_secondary_text_legible_and_styles_full_viewer(self):
+        glass_css = CSS[CSS.index("/* Windows Acrylic"):CSS.index("/* CSS zoom")]
+        self.assertIn("--muted: #bbc0ca", glass_css)
+        self.assertIn("--faint: #959ca8", glass_css)
+        self.assertIn("body.theme-gloss .summary-row", glass_css)
+        self.assertIn("text-shadow: 0 1px 3px rgba(0,0,0,.88)", glass_css)
+        self.assertIn("body.theme-gloss .viewer { background: rgba(5,6,8,.12)", glass_css)
+        self.assertIn("body.theme-gloss .viewer-stage { background-color: rgba(6,7,9,.2)", glass_css)
+        self.assertIn("body.theme-gloss .inspector", glass_css)
+        self.assertIn("background: rgba(16,17,20,.5)", glass_css)
+        self.assertIn("body.theme-gloss .prompt-box", glass_css)
+        self.assertIn("body.theme-gloss .meta-cell", glass_css)
+        self.assertIn("body.theme-gloss .workflow-canvas { background-color: rgba(7,8,10,.22)", glass_css)
+        self.assertNotIn("body.theme-gloss .workflow-canvas { background-color: rgba(7,8,10,.84)", glass_css)
+
     def test_readme_download_name_matches_the_release_version(self):
         self.assertIn('__version__ = "1.0.7"', PACKAGE_INIT)
         self.assertIn("LumaVault-1.0.7-Windows.zip", README)
