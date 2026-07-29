@@ -719,7 +719,7 @@
 
   function workflowParamHeight(params) {
     if (!params.length) return 0;
-    return 14 + params.reduce((height, param) => height + (param.multiline ? 104 : 22), 0);
+    return 14 + params.reduce((height, param) => height + (param.multiline ? 74 : 22), 0);
   }
 
   function applyWorkflowTransform() {
@@ -783,7 +783,7 @@
     });
 
     let remainingWorkflowDomRecords = Math.max(0, WORKFLOW_DOM_BUDGET - sourceNodes.length);
-    const prepared = sourceNodes.map((node, index) => {
+    let prepared = sourceNodes.map((node, index) => {
       const params = Array.isArray(node.params) ? node.params.slice(0, Math.min(7, remainingWorkflowDomRecords)) : [];
       remainingWorkflowDomRecords = Math.max(0, remainingWorkflowDomRecords - params.length);
       const parameterHeight = workflowParamHeight(params);
@@ -803,23 +803,23 @@
       const inputs = compactPorts(rawInputs, inputRequired);
       const outputs = compactPorts(rawOutputs, outputRequired);
       remainingWorkflowDomRecords = Math.max(0, remainingWorkflowDomRecords - Math.max(inputs.length, outputs.length));
-      const savedWidth = Number(node.size?.[0]) || 240;
-      const savedHeight = Number(node.size?.[1]) || 140;
       const savedX = Number(node.position?.[0]);
       const savedY = Number(node.position?.[1]);
       const contentHeight = 48 + Math.max(inputs.length, outputs.length) * 22 + parameterHeight;
       return {
         ...node,
-        x: Number.isFinite(savedX) ? savedX : index % 4 * 320,
-        y: Number.isFinite(savedY) ? savedY : Math.floor(index / 4) * 240,
-        width: Math.max(210, Math.min(420, savedWidth)),
-        height: Math.max(92, Math.min(12000, Math.max(savedHeight, contentHeight))),
+        position: [
+          Number.isFinite(savedX) ? savedX : index % 4 * 320,
+          Number.isFinite(savedY) ? savedY : Math.floor(index / 4) * 240
+        ],
+        width: 264,
+        height: Math.max(82, contentHeight),
         inputs, outputs, params,
         inputRowBySlot: new Map(inputs.map((port, row) => [port.originalSlot, row])),
         outputRowBySlot: new Map(outputs.map((port, row) => [port.originalSlot, row]))
       };
     });
-    const preparedGroups = (Array.isArray(graph?.groups) ? graph.groups.slice(0, 128) : []).map(group => {
+    let preparedGroups = (Array.isArray(graph?.groups) ? graph.groups.slice(0, 128) : []).map(group => {
       const x = Number(group.position?.[0]);
       const y = Number(group.position?.[1]);
       const width = Number(group.size?.[0]);
@@ -832,14 +832,9 @@
         height: Number.isFinite(height) && height > 0 ? height : 220
       };
     });
-    let minX = Infinity;
-    let minY = Infinity;
-    for (const item of [...prepared, ...preparedGroups]) {
-      minX = Math.min(minX, item.x);
-      minY = Math.min(minY, item.y);
-    }
-    prepared.forEach(node => { node.x = node.x - minX + 74; node.y = node.y - minY + 74; });
-    preparedGroups.forEach(group => { group.x = group.x - minX + 74; group.y = group.y - minY + 74; });
+    const compactLayout = window.LumaVaultWorkflowLayout.compactWorkflowLayout(prepared, sourceLinks, preparedGroups);
+    prepared = compactLayout.nodes;
+    preparedGroups = compactLayout.groups;
     let contentWidth = 0;
     let contentHeight = 0;
     for (const node of prepared) {
@@ -891,13 +886,13 @@
         </div>`;
       }).join("");
       const params = node.params.length ? `<div class="workflow-node-params">${node.params.map(param => `<div class="${param.multiline ? "multiline" : ""}"><b title="${escapeHtml(param.name)}">${escapeHtml(param.name)}</b><span ${param.multiline ? "" : `title="${escapeHtml(param.value)}"`}>${escapeHtml(param.value)}</span></div>`).join("")}</div>` : "";
-      return `<article class="workflow-node ${Number(node.mode) !== 0 ? "muted" : ""}" data-workflow-node="${escapeHtml(node.id)}" style="left:${node.x}px;top:${node.y}px;width:${node.width}px;min-height:${node.height}px;--node-accent:${workflowNodeAccent(node.type)}">
+      return `<article class="workflow-node ${Number(node.mode) !== 0 ? "muted" : ""}" data-workflow-node="${escapeHtml(node.id)}" style="left:${node.x}px;top:${node.y}px;width:${node.width}px;height:${node.height}px;--node-accent:${workflowNodeAccent(node.type)}">
         <header><span></span><strong title="${escapeHtml(node.title || node.type)}">${escapeHtml(node.title || node.type || "Unknown")}</strong><small>#${escapeHtml(node.id)}</small></header>
         <div class="workflow-node-body">${rows}${params}</div>
       </article>`;
     }).join("");
 
-    const graphLabel = graph.kind === "api" ? "AUTO-ARRANGED API GRAPH" : "SAVED COMFYUI LAYOUT";
+    const graphLabel = `${graph.kind === "api" ? "API GRAPH" : "COMFYUI GRAPH"} · COMPACT AUTO-LAYOUT`;
     panel.innerHTML = `<div class="workflow-graph">
       <div class="workflow-toolbar">
         <div class="workflow-summary"><span>${graphLabel}</span><strong>${prepared.length} NODES · ${renderedLinks.length} LINKS</strong></div>

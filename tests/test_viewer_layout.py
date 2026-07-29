@@ -127,6 +127,16 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn(".workflow-node", CSS)
         self.assertIn(".workflow-link", CSS)
 
+    def test_workflow_uses_compact_content_sizing_and_non_overlapping_auto_layout(self):
+        layout_script = INDEX.index('<script src="/static/workflow-layout.js"></script>')
+        app_script = INDEX.index('<script src="/static/app.js"></script>')
+        self.assertLess(layout_script, app_script)
+        self.assertIn("LumaVaultWorkflowLayout.compactWorkflowLayout", JS)
+        self.assertNotIn("Math.max(savedHeight, contentHeight)", JS)
+        self.assertIn("height:${node.height}px", JS)
+        self.assertIn("COMPACT AUTO-LAYOUT", JS)
+        self.assertIn("min-height: 74px", CSS)
+
     def test_nodes_tab_restores_the_searchable_node_list_without_replacing_workflow_graph(self):
         self.assertIn('data-tab="nodes">Nodes</button>', INDEX)
         self.assertIn('data-panel="nodes" id="nodesPanel"', INDEX)

@@ -1373,7 +1373,7 @@ def build_workflow_graph(workflow_data, workflow_type):
 
     def graph_param(name, value, node_type=""):
         text = graph_param_text(name, value, node_type)
-        hint = f"{name} {node_type}".lower()
+        hint = str(name).lower()
         multiline = isinstance(text, str) and (
             len(text) > 80 or "\n" in text or any(word in hint for word in ("text", "prompt", "caption"))
         )
@@ -1585,7 +1585,7 @@ def build_workflow_graph(workflow_data, workflow_type):
         ):
             if isinstance(param, dict):
                 value = param.get("value", "")
-                hint = f"{param.get('name', '')} {node_type}".lower()
+                hint = str(param.get('name', '')).lower()
                 params.append({
                     "name": graph_text(param.get("name")),
                     "value": value,

@@ -279,7 +279,7 @@ select { height: 32px; padding: 0 28px 0 10px; color: var(--text-2); background:
 .workflow-links { z-index: 1; pointer-events: none; }
 .workflow-nodes { z-index: 2; }
 .workflow-link { fill: none; stroke: var(--link-color); stroke-width: 3; stroke-linecap: round; opacity: .72; filter: drop-shadow(0 0 3px color-mix(in srgb, var(--link-color) 45%, transparent)); }
-.workflow-node { position: absolute; overflow: visible; border: 1px solid rgba(255,255,255,.14); border-radius: 8px; background: rgba(19,21,27,.97); box-shadow: 0 12px 30px rgba(0,0,0,.38), inset 0 1px rgba(255,255,255,.035); color: var(--text-2); cursor: default; }
+.workflow-node { position: absolute; box-sizing: border-box; overflow: visible; border: 1px solid rgba(255,255,255,.14); border-radius: 8px; background: rgba(19,21,27,.97); box-shadow: 0 12px 30px rgba(0,0,0,.38), inset 0 1px rgba(255,255,255,.035); color: var(--text-2); cursor: default; }
 .workflow-node:hover { border-color: rgba(255,255,255,.25); box-shadow: 0 15px 34px rgba(0,0,0,.48), 0 0 0 1px color-mix(in srgb, var(--node-accent) 20%, transparent); }
 .workflow-node.selected { border-color: var(--node-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--node-accent) 22%, transparent), 0 15px 36px rgba(0,0,0,.5); }
 .workflow-node.muted { opacity: .48; filter: saturate(.4); }
@@ -302,9 +302,9 @@ select { height: 32px; padding: 0 28px 0 10px; color: var(--text-2); background:
 .workflow-node-params b, .workflow-node-params span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 7.5px; }
 .workflow-node-params b { color: var(--faint); font-weight: 500; }
 .workflow-node-params span { padding: 4px 6px; border: 1px solid rgba(255,255,255,.055); border-radius: 4px; background: rgba(255,255,255,.025); color: #b8bbc3; }
-.workflow-node-params > div.multiline { min-height: 104px; display: block; padding: 4px 0 6px; }
+.workflow-node-params > div.multiline { min-height: 74px; display: block; padding: 4px 0 6px; }
 .workflow-node-params > div.multiline b { display: block; margin-bottom: 5px; white-space: nowrap; }
-.workflow-node-params > div.multiline span { display: block; max-height: 82px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; text-overflow: clip; line-height: 1.45; scrollbar-width: thin; }
+.workflow-node-params > div.multiline span { display: block; box-sizing: border-box; max-height: 54px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; text-overflow: clip; line-height: 1.45; scrollbar-width: thin; }
 .workflow-help { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; background: rgba(10,11,15,.72); backdrop-filter: blur(8px); color: rgba(255,255,255,.34); font-size: 8px; white-space: nowrap; pointer-events: none; }
 .workflow-empty { height: 100%; min-height: 280px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; text-align: center; background: radial-gradient(circle at center, rgba(119,114,255,.09), transparent 35%); }
 .workflow-empty-mark { width: 54px; height: 54px; margin-bottom: 8px; display: grid; place-items: center; border: 1px solid rgba(119,114,255,.25); border-radius: 14px; color: #aaa7ff; background: var(--accent-soft); font-size: 25px; }

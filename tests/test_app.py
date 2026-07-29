@@ -298,6 +298,26 @@ class LumaVaultAppTests(unittest.TestCase):
         self.assertEqual(text_param["value"], long_prompt)
         self.assertTrue(text_param["multiline"])
 
+    def test_prompt_builder_marks_only_actual_long_text_parameters_as_multiline(self):
+        graph = build_workflow_graph({
+            "nodes": [{
+                "id": 1,
+                "type": "Ideogram4PromptBuilderKJ",
+                "inputs": [
+                    {"name": "model", "link": 32},
+                    {"name": "clip", "link": 34},
+                ],
+                "widgets_values": ["short choice", "x" * 120],
+            }],
+            "links": [],
+        }, "ui")
+
+        params = {param["name"]: param for param in graph["nodes"][0]["params"]}
+        self.assertFalse(params["model"]["multiline"])
+        self.assertFalse(params["clip"]["multiline"])
+        self.assertFalse(params["widget_1"]["multiline"])
+        self.assertTrue(params["widget_2"]["multiline"])
+
     def test_workflow_graph_sanitizes_nonfinite_coordinates_and_invalid_slots(self):
         ui_graph = build_workflow_graph({
             "nodes": [
