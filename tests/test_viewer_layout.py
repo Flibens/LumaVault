@@ -155,6 +155,25 @@ class ViewerLayoutContractTests(unittest.TestCase):
         create_window = MAIN[MAIN.index("window = webview.create_window("):MAIN.index("try:", MAIN.index("window = webview.create_window("))]
         self.assertIn("transparent=True", create_window)
 
+    def test_inspector_scopes_text_selection_without_enabling_it_window_wide(self):
+        create_window = MAIN[MAIN.index("window = webview.create_window("):MAIN.index("try:", MAIN.index("window = webview.create_window("))]
+        self.assertNotIn("text_select=True", create_window)
+        self.assertIn("#detailsPanel, #nodesPanel, #rawPanel, .workflow-node { user-select: text; -webkit-user-select: text; }", CSS)
+        self.assertIn("::selection { background: rgba(119,114,255,.58); color: #fff; }", CSS)
+
+    def test_workflow_offers_one_selected_node_json_copy_action(self):
+        self.assertEqual(JS.count('<button class="node-json" data-workflow-action="copy-node-json"'), 1)
+        self.assertIn('data-workflow-action="copy-node-json" disabled', JS)
+        self.assertIn("workflowSourceIndex: index", JS)
+        self.assertIn("sourceNodes, selectedSourceIndex: null", JS)
+        self.assertIn("view.selectedSourceIndex = Number(node.dataset.workflowSourceIndex)", JS)
+        self.assertIn("copyButton.disabled = !Number.isInteger(view.selectedSourceIndex)", JS)
+        self.assertIn('copyText(JSON.stringify(sourceNode, null, 2), "Node JSON copied")', JS)
+        self.assertIn(".workflow-controls button.node-json", CSS)
+        self.assertIn(".workflow-controls button:disabled", CSS)
+        self.assertNotIn("text_select=True", MAIN)
+        self.assertIn('if (event.button !== 0 || event.target.closest("button, .workflow-node")) return;', JS)
+
     def test_glass_theme_uses_native_windows_acrylic_and_neutral_materials(self):
         self.assertIn("DWMWA_SYSTEMBACKDROP_TYPE = 38", MAIN)
         self.assertIn("DWMSBT_TRANSIENTWINDOW = 3", MAIN)
@@ -197,8 +216,8 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn("isolation: isolate", glass_css)
 
     def test_readme_download_name_matches_the_release_version(self):
-        self.assertIn('__version__ = "1.0.7"', PACKAGE_INIT)
-        self.assertIn("LumaVault-1.0.7-Windows.zip", README)
+        self.assertIn('__version__ = "1.0.8"', PACKAGE_INIT)
+        self.assertIn("LumaVault-1.0.8-Windows.zip", README)
         self.assertNotIn("LumaVault-1.0.6-Windows.zip", README)
 
     def test_workflow_long_text_values_wrap_and_scroll_without_visual_truncation(self):

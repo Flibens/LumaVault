@@ -24,8 +24,9 @@ A polished, standalone Windows media browser for ComfyUI outputs and other creat
 - Video and audio playback with fully visible native controls
 - Detailed ComfyUI metadata: prompts, seed, model, sampler, scheduler, dimensions, and LoRAs
 - LoRA Manager/Stacker support that reports only the LoRAs active for an image
-- Visual ComfyUI-style workflow viewer with saved layouts, expanded labeled subgraphs and internal links, pan, zoom, fit-to-screen, and automatic arrangement for API-only graphs
+- Visual ComfyUI-style workflow viewer with saved layouts, expanded labeled subgraphs and internal links, pan, zoom, fit-to-screen, selected-node JSON copying, and automatic arrangement for API-only graphs
 - Separate searchable workflow node list with expandable parameter details
+- Selectable metadata and workflow-node text with a themed violet selection highlight
 - Raw embedded metadata viewer and one-click copy actions
 - Ctrl-click multi-selection with group path-copy and Recycle Bin actions
 - A/B image comparison slider
@@ -37,7 +38,7 @@ A polished, standalone Windows media browser for ComfyUI outputs and other creat
 
 ## Windows download
 
-Download `LumaVault-1.0.7-Windows.zip` from the [latest release](https://github.com/Flibens/LumaVault/releases/latest), extract it, and run:
+Download `LumaVault-1.0.8-Windows.zip` from the [latest release](https://github.com/Flibens/LumaVault/releases/latest), extract it, and run:
 
 ```text
 LumaVault\LumaVault.exe

@@ -808,6 +808,7 @@
       const contentHeight = 48 + Math.max(inputs.length, outputs.length) * 22 + parameterHeight;
       return {
         ...node,
+        workflowSourceIndex: index,
         position: [
           Number.isFinite(savedX) ? savedX : index % 4 * 320,
           Number.isFinite(savedY) ? savedY : Math.floor(index / 4) * 240
@@ -886,7 +887,7 @@
         </div>`;
       }).join("");
       const params = node.params.length ? `<div class="workflow-node-params">${node.params.map(param => `<div class="${param.multiline ? "multiline" : ""}"><b title="${escapeHtml(param.name)}">${escapeHtml(param.name)}</b><span ${param.multiline ? "" : `title="${escapeHtml(param.value)}"`}>${escapeHtml(param.value)}</span></div>`).join("")}</div>` : "";
-      return `<article class="workflow-node ${Number(node.mode) !== 0 ? "muted" : ""}" data-workflow-node="${escapeHtml(node.id)}" style="left:${node.x}px;top:${node.y}px;width:${node.width}px;height:${node.height}px;--node-accent:${workflowNodeAccent(node.type)}">
+      return `<article class="workflow-node ${Number(node.mode) !== 0 ? "muted" : ""}" data-workflow-node="${escapeHtml(node.id)}" data-workflow-source-index="${node.workflowSourceIndex}" style="left:${node.x}px;top:${node.y}px;width:${node.width}px;height:${node.height}px;--node-accent:${workflowNodeAccent(node.type)}">
         <header><span></span><strong title="${escapeHtml(node.title || node.type)}">${escapeHtml(node.title || node.type || "Unknown")}</strong><small>#${escapeHtml(node.id)}</small></header>
         <div class="workflow-node-body">${rows}${params}</div>
       </article>`;
@@ -900,6 +901,7 @@
           <button data-workflow-action="zoom-out" title="Zoom out">${icon("minus")}</button>
           <output id="workflowZoomValue">100%</output>
           <button data-workflow-action="zoom-in" title="Zoom in">${icon("plus")}</button>
+          <button class="node-json" data-workflow-action="copy-node-json" disabled title="Select a node to copy its JSON">Node JSON</button>
           <button class="fit" data-workflow-action="fit">Fit workflow</button>
         </div>
       </div>
@@ -915,10 +917,15 @@
 
     const canvas = $(".workflow-canvas", panel);
     const scene = $(".workflow-scene", panel);
-    state.workflowView = { canvas, scene, width, height, scale: 1, x: 0, y: 0, drag: null };
+    state.workflowView = { canvas, scene, width, height, scale: 1, x: 0, y: 0, drag: null, sourceNodes, selectedSourceIndex: null };
     $$('[data-workflow-action]', panel).forEach(button => button.addEventListener("click", () => {
-      if (button.dataset.workflowAction === "fit") fitWorkflowGraph();
-      else zoomWorkflow(button.dataset.workflowAction === "zoom-in" ? 1.2 : 1 / 1.2);
+      const action = button.dataset.workflowAction;
+      if (action === "copy-node-json") {
+        const view = state.workflowView;
+        const sourceNode = Number.isInteger(view?.selectedSourceIndex) ? view.sourceNodes[view.selectedSourceIndex] : null;
+        if (sourceNode) copyText(JSON.stringify(sourceNode, null, 2), "Node JSON copied");
+      } else if (action === "fit") fitWorkflowGraph();
+      else zoomWorkflow(action === "zoom-in" ? 1.2 : 1 / 1.2);
     }));
     canvas.addEventListener("wheel", event => {
       event.preventDefault();
@@ -949,6 +956,10 @@
     canvas.addEventListener("dblclick", event => { if (!event.target.closest(".workflow-node")) fitWorkflowGraph(); });
     $$(".workflow-node", panel).forEach(node => node.addEventListener("click", () => {
       $$(".workflow-node", panel).forEach(row => row.classList.toggle("selected", row === node));
+      const view = state.workflowView;
+      view.selectedSourceIndex = Number(node.dataset.workflowSourceIndex);
+      const copyButton = $('[data-workflow-action="copy-node-json"]', panel);
+      copyButton.disabled = !Number.isInteger(view.selectedSourceIndex);
     }));
     if ($("#viewer").classList.contains("workflow-view")) requestAnimationFrame(fitWorkflowGraph);
   }
