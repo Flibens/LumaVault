@@ -53,6 +53,42 @@ class NativeClipboardTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["error"], "Image not found.")
 
+    def test_native_api_copies_a_contained_workflow_input_image(self):
+        with tempfile.TemporaryDirectory() as folder:
+            comfy = Path(folder) / "ComfyUI"
+            output = comfy / "output" / "video" / "result.mp4"
+            input_image = comfy / "input" / "pasted" / "reference.png"
+            output.parent.mkdir(parents=True)
+            input_image.parent.mkdir(parents=True)
+            output.write_bytes(b"video")
+            Image.new("RGB", (2, 2), (10, 20, 30)).save(input_image)
+
+            class State:
+                def resolve_file(self, source_id, relative_path):
+                    return output
+
+            with patch("main._copy_image_to_windows_clipboard", return_value=["CF_DIB", "CF_HDROP"]) as copy:
+                result = NativeApi(State()).copy_workflow_input("source", "video/result.mp4", "pasted/reference.png")
+
+            copy.assert_called_once_with(input_image.resolve())
+            self.assertTrue(result["success"])
+
+    def test_native_api_rejects_workflow_input_path_escape(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / "ComfyUI" / "output" / "result.mp4"
+            output.parent.mkdir(parents=True)
+            output.write_bytes(b"video")
+
+            class State:
+                def resolve_file(self, source_id, relative_path):
+                    return output
+
+            with patch("main._copy_image_to_windows_clipboard") as copy:
+                result = NativeApi(State()).copy_workflow_input("source", "result.mp4", "../secret.png")
+
+            copy.assert_not_called()
+            self.assertFalse(result["success"])
+
 
 if __name__ == "__main__":
     unittest.main()

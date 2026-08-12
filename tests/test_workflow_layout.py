@@ -25,6 +25,19 @@ process.stdout.write(JSON.stringify(layout.compactWorkflowLayout(input.nodes, in
     return json.loads(completed.stdout)
 
 
+def run_source_layout(nodes, links=None, groups=None):
+    payload = json.dumps({"nodes": nodes, "links": links or [], "groups": groups or []})
+    script = f"""
+const layout = require({json.dumps(str(LAYOUT_MODULE))});
+const input = {payload};
+process.stdout.write(JSON.stringify(layout.sourceWorkflowLayout(input.nodes, input.links, input.groups)));
+"""
+    completed = subprocess.run(
+        ["node", "-e", script], cwd=ROOT, check=True, capture_output=True, text=True
+    )
+    return json.loads(completed.stdout)
+
+
 def rectangles_overlap(left, right):
     return not (
         left["x"] + left["width"] <= right["x"]
@@ -35,6 +48,44 @@ def rectangles_overlap(left, right):
 
 
 class CompactWorkflowLayoutTests(unittest.TestCase):
+
+    def test_source_layout_preserves_relative_positions_without_overlap(self):
+        script = f"""
+const layout = require({json.dumps(str(ROOT / 'lumavault' / 'static' / 'workflow-layout.js'))});
+const nodes = [
+  {{id:'a', position:[0,0], width:264, height:180}},
+  {{id:'b', position:[100,80], width:264, height:180}},
+  {{id:'c', position:[900,400], width:264, height:100}}
+];
+console.log(JSON.stringify(layout.sourceWorkflowLayout(nodes, [], [])));
+"""
+        result = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout)
+        by_id = {node["id"]: node for node in result["nodes"]}
+        self.assertLess(by_id["a"]["x"], by_id["c"]["x"])
+        self.assertFalse(self._overlaps(by_id["a"], by_id["b"]))
+
+    def test_source_layout_removes_large_positive_canvas_offset_before_fit(self):
+        result = run_source_layout([
+            {"id": "input", "position": [8200, 6400], "width": 264, "height": 140},
+            {"id": "output", "position": [9400, 7100], "width": 264, "height": 180},
+        ])
+        by_id = {node["id"]: node for node in result["nodes"]}
+
+        self.assertEqual(min(node["x"] for node in result["nodes"]), 64)
+        self.assertEqual(min(node["y"] for node in result["nodes"]), 64)
+        self.assertEqual(by_id["output"]["x"] - by_id["input"]["x"], 1200)
+        self.assertEqual(by_id["output"]["y"] - by_id["input"]["y"], 700)
+        self.assertLess(result["width"], 1700)
+        self.assertLess(result["height"], 1100)
+
+    @staticmethod
+    def _overlaps(left, right):
+        return not (
+            left["x"] + left["width"] <= right["x"]
+            or right["x"] + right["width"] <= left["x"]
+            or left["y"] + left["height"] <= right["y"]
+            or right["y"] + right["height"] <= left["y"]
+        )
     def test_node_height_includes_rendered_body_padding_and_borders(self):
         result = run_layout([{
             "id": "note",

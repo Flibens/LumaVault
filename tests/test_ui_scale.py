@@ -8,6 +8,25 @@ JS = (ROOT / "lumavault" / "static" / "app.js").read_text(encoding="utf-8")
 
 
 class UiScaleContractTests(unittest.TestCase):
+    def test_original_and_gloss_themes_use_orange_instead_of_purple_accents(self):
+        self.assertIn("--accent: #f28c28", CSS)
+        self.assertIn("--accent-2: #ffad42", CSS)
+        self.assertIn("--accent-soft: rgba(242,140,40,.16)", CSS)
+        self.assertIn("::selection { background: rgba(242,140,40,.58)", CSS)
+        for purple in ("#7772ff", "#9c8cff", "#8d89ff", "#aaa7ff", "#b8b6ff", "#bab8ff", "119,114,255", "156,140,255"):
+            self.assertNotIn(purple, CSS)
+        self.assertNotIn("#7772ff", JS)
+        self.assertNotIn("#8d89ff", JS)
+
+    def test_secondary_actions_and_metadata_do_not_keep_lavender_accents(self):
+        for lavender in ("#9895ff", "#b5b2ff", "#b7b4ff", "#c5c3ff", "#dddfff"):
+            self.assertNotIn(lavender, CSS)
+        self.assertIn(".meta-section-title button { border: 0; background: transparent; color: var(--accent-2)", CSS)
+        self.assertIn(".lora-chip strong { display: block; color: #ffc06a", CSS)
+        self.assertIn("background: var(--accent-soft); color: #ffc06a", CSS)
+        self.assertIn("button.node-json { min-width: 72px; color: #ffd19a", CSS)
+        self.assertIn("button.fit { min-width: 84px; color: #ffd19a", CSS)
+
     def test_ui_scale_is_adjustable_persistent_and_viewport_safe(self):
         self.assertIn('id="uiScale"', HTML)
         self.assertIn('id="uiScaleValue"', HTML)

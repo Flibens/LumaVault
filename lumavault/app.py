@@ -21,8 +21,9 @@ from send2trash import send2trash
 from . import __version__
 from .metadata import (
     build_workflow_graph,
+    extract_media_dimensions,
     extract_metadata,
-    extract_workflow_from_file,
+    extract_workflow_payloads_from_file,
     extract_workflow_nodes,
     parse_comfy_metadata,
     raw_metadata_for_display,
@@ -91,9 +92,13 @@ def file_generation_metadata(path: Path) -> tuple[dict[str, Any], Any, str | Non
     raw: dict[str, Any] = {}
     if media_kind(path) == "image":
         raw = extract_metadata(path)
-    workflow_obj, workflow_type = extract_workflow_from_file(path)
-    if workflow_obj:
-        raw["workflow" if workflow_type == "ui" else "prompt"] = workflow_obj
+    payloads = extract_workflow_payloads_from_file(path)
+    if payloads.get("ui"):
+        raw["workflow"] = payloads["ui"]
+    if payloads.get("api"):
+        raw["prompt"] = payloads["api"]
+    workflow_type = "ui" if payloads.get("ui") else ("api" if payloads.get("api") else None)
+    workflow_obj = payloads.get(workflow_type) if workflow_type else None
     return raw, workflow_obj, workflow_type, parse_comfy_metadata(raw)
 
 
@@ -661,6 +666,41 @@ def create_app(state: VaultState | None = None) -> Flask:
             return "", 404
         return send_file(thumb, mimetype="image/jpeg", conditional=True, max_age=86400)
 
+    @app.get("/api/workflow-input")
+    def workflow_input():
+        output_path, _, _ = requested_file()
+        input_name = request.args.get("input", "")
+        normalized = input_name.replace("\\", "/")
+        parts = [part for part in normalized.split("/") if part]
+        if (
+            not output_path or not output_path.exists() or not parts
+            or normalized.startswith(("/", "//"))
+            or ":" in parts[0]
+            or any(part in {".", ".."} for part in parts)
+        ):
+            return "", 404
+
+        # Comfy output sources commonly point at ComfyUI/output or a child such as
+        # output/video. Walk ancestors to find that boundary, then serve only from
+        # its sibling input directory. Resolution containment prevents traversal.
+        output_dir = None
+        for parent in output_path.parents:
+            if parent.name.casefold() == "output":
+                output_dir = parent
+                break
+        if output_dir is None:
+            return "", 404
+        input_root = (output_dir.parent / "input").resolve()
+        candidate = input_root.joinpath(*parts).resolve()
+        try:
+            candidate.relative_to(input_root)
+        except ValueError:
+            return "", 404
+        if not candidate.is_file() or media_kind(candidate) != "image":
+            return "", 404
+        mime = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        return send_file(candidate, mimetype=mime, conditional=True, max_age=3600)
+
     @app.get("/api/metadata")
     def metadata():
         path, source_id, relative_path = requested_file()
@@ -678,6 +718,10 @@ def create_app(state: VaultState | None = None) -> Flask:
                     parsed["height"] = parsed.get("height") or image.height
             except Exception:
                 pass
+        elif kind == "video":
+            dimensions = extract_media_dimensions(path)
+            parsed["width"] = parsed.get("width") or dimensions.get("width")
+            parsed["height"] = parsed.get("height") or dimensions.get("height")
         stat = path.stat()
         raw_display = raw_metadata_for_display(raw)
         return jsonify({

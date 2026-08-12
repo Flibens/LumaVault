@@ -269,6 +269,34 @@ class NativeApi:
             message = str(error).strip() or "Image could not be copied."
             return {"success": False, "error": message}
 
+    def copy_workflow_input(self, source_id: str, output_relative_path: str, input_relative_path: str):
+        output_path = self.state.resolve_file(source_id, output_relative_path)
+        normalized = str(input_relative_path or "").replace("\\", "/")
+        parts = [part for part in normalized.split("/") if part]
+        if (
+            output_path is None or not output_path.is_file() or not parts
+            or normalized.startswith(("/", "//")) or ":" in parts[0]
+            or any(part in {".", ".."} for part in parts)
+        ):
+            return {"success": False, "error": "Input image not found."}
+        output_root = next((parent for parent in output_path.parents if parent.name.casefold() == "output"), None)
+        if output_root is None:
+            return {"success": False, "error": "Input image not found."}
+        input_root = (output_root.parent / "input").resolve()
+        candidate = input_root.joinpath(*parts).resolve()
+        try:
+            candidate.relative_to(input_root)
+        except ValueError:
+            return {"success": False, "error": "Input image not found."}
+        if not candidate.is_file():
+            return {"success": False, "error": "Input image not found."}
+        try:
+            formats = _copy_image_to_windows_clipboard(candidate)
+            return {"success": True, "formats": formats}
+        except Exception as error:
+            message = str(error).strip() or "Image could not be copied."
+            return {"success": False, "error": message}
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="LumaVault standalone ComfyUI media browser")

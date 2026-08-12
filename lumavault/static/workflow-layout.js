@@ -116,6 +116,72 @@
     return { width: maxRight - originX, height: maxBottom - originY };
   }
 
+  function rectanglesOverlap(left, right, gap = 0) {
+    return left.x < right.x + right.width + gap
+      && left.x + left.width + gap > right.x
+      && left.y < right.y + right.height + gap
+      && left.y + left.height + gap > right.y;
+  }
+
+  // Preserve the author's ComfyUI placement while separating nodes whose saved
+  // rectangles collide. Nodes are processed in stable source order, so a graph
+  // always opens the same way and distant relative placement remains intact.
+  function sourceWorkflowLayout(sourceNodes, _sourceLinks = [], sourceGroups = []) {
+    const nodes = (Array.isArray(sourceNodes) ? sourceNodes : []).map((source, index) => {
+      const x = numberAt(source.position, 0, index % 4 * (NODE_WIDTH + COLUMN_GAP));
+      const y = numberAt(source.position, 1, Math.floor(index / 4) * 240);
+      return {
+        ...source,
+        x,
+        y,
+        width: Number.isFinite(Number(source.width)) && Number(source.width) > 0 ? Number(source.width) : NODE_WIDTH,
+        height: Number.isFinite(Number(source.height)) && Number(source.height) > 0 ? Number(source.height) : compactNodeHeight(source),
+      };
+    });
+    const groups = (Array.isArray(sourceGroups) ? sourceGroups : []).map(group => ({ ...group }));
+    const layoutX = [
+      ...nodes.map(node => node.x),
+      ...groups.map(group => Number.isFinite(Number(group.x)) ? Number(group.x) : numberAt(group.position, 0)),
+    ];
+    const layoutY = [
+      ...nodes.map(node => node.y),
+      ...groups.map(group => Number.isFinite(Number(group.y)) ? Number(group.y) : numberAt(group.position, 1)),
+    ];
+    const minimumX = layoutX.length ? Math.min(...layoutX) : 0;
+    const minimumY = layoutY.length ? Math.min(...layoutY) : 0;
+    const offsetX = SCENE_PADDING - minimumX;
+    const offsetY = SCENE_PADDING - minimumY;
+    const placed = [];
+
+    for (const node of nodes) {
+      node.x += offsetX;
+      node.y += offsetY;
+      let collision;
+      // Move only the colliding node, preferring the smaller downward shift.
+      // Rechecking all placed nodes makes cascaded collisions safe as well.
+      while ((collision = placed.find(other => rectanglesOverlap(node, other, ROW_GAP / 2)))) {
+        node.y = collision.y + collision.height + ROW_GAP;
+      }
+      placed.push(node);
+    }
+
+    let maxRight = SCENE_PADDING;
+    let maxBottom = SCENE_PADDING;
+    for (const node of nodes) {
+      maxRight = Math.max(maxRight, node.x + node.width);
+      maxBottom = Math.max(maxBottom, node.y + node.height);
+    }
+    for (const group of groups) {
+      group.x = (Number.isFinite(Number(group.x)) ? Number(group.x) : numberAt(group.position, 0)) + offsetX;
+      group.y = (Number.isFinite(Number(group.y)) ? Number(group.y) : numberAt(group.position, 1)) + offsetY;
+      group.width = Number(group.width) > 0 ? Number(group.width) : Math.max(220, numberAt(group.size, 0, 320));
+      group.height = Number(group.height) > 0 ? Number(group.height) : Math.max(180, numberAt(group.size, 1, 220));
+      maxRight = Math.max(maxRight, group.x + group.width);
+      maxBottom = Math.max(maxBottom, group.y + group.height);
+    }
+    return { nodes, groups, width: maxRight + SCENE_PADDING, height: maxBottom + SCENE_PADDING };
+  }
+
   function compactWorkflowLayout(sourceNodes, sourceLinks = [], sourceGroups = []) {
     const nodes = (Array.isArray(sourceNodes) ? sourceNodes : []).map(node => ({ ...node }));
     const links = Array.isArray(sourceLinks) ? sourceLinks : [];
@@ -151,5 +217,5 @@
     };
   }
 
-  return { compactNodeHeight, compactWorkflowLayout };
+  return { compactNodeHeight, sourceWorkflowLayout, compactWorkflowLayout };
 });

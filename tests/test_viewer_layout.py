@@ -115,8 +115,8 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn(".media-card.multi-selected", CSS)
 
     def test_workflow_tab_uses_a_full_size_themed_pan_and_zoom_graph(self):
-        self.assertIn("renderWorkflow(data.workflow_graph)", JS)
-        self.assertIn("function renderWorkflow(graph)", JS)
+        self.assertIn("renderWorkflow(data.workflow_graph, item)", JS)
+        self.assertIn("function renderWorkflow(graph, item", JS)
         self.assertIn('class="workflow-canvas"', JS)
         self.assertIn('addEventListener("wheel"', JS)
         self.assertIn('addEventListener("pointerdown"', JS)
@@ -127,6 +127,25 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn(".workflow-node", CSS)
         self.assertIn(".workflow-link", CSS)
 
+    def test_workflow_supports_original_arranged_and_collision_safe_manual_layouts(self):
+        self.assertIn('data-workflow-action="layout-original"', JS)
+        self.assertIn('data-workflow-action="layout-arrange"', JS)
+        self.assertIn("sourceWorkflowLayout", JS)
+        self.assertIn("resolveWorkflowNodeCollision", JS)
+        self.assertIn("workflowNodeDrag", JS)
+        self.assertIn(".workflow-node.dragging", CSS)
+
+    def test_workflow_nodes_can_render_input_and_output_media_previews(self):
+        self.assertIn("workflowMediaPreview", JS)
+        self.assertIn("data-workflow-preview", JS)
+        self.assertIn(".workflow-node-preview", CSS)
+
+    def test_each_workflow_input_preview_has_its_own_copy_image_action(self):
+        self.assertIn("workflowMediaPreviews(node, item)", JS)
+        self.assertIn('data-workflow-copy-input="${previewIndex}"', JS)
+        self.assertIn("copyWorkflowInputImage", JS)
+        self.assertIn("Copy input image", JS)
+
     def test_workflow_uses_compact_content_sizing_and_non_overlapping_auto_layout(self):
         layout_script = INDEX.index('<script src="/static/workflow-layout.js"></script>')
         app_script = INDEX.index('<script src="/static/app.js"></script>')
@@ -134,7 +153,7 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn("LumaVaultWorkflowLayout.compactWorkflowLayout", JS)
         self.assertNotIn("Math.max(savedHeight, contentHeight)", JS)
         self.assertIn("height:${node.height}px", JS)
-        self.assertIn("COMPACT AUTO-LAYOUT", JS)
+        self.assertIn('layoutMode === "arranged" ? "ARRANGED" : "ORIGINAL"', JS)
         self.assertIn("min-height: 74px", CSS)
 
     def test_nodes_tab_restores_the_searchable_node_list_without_replacing_workflow_graph(self):
@@ -144,7 +163,7 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn("function renderNodeList(nodes)", JS)
         self.assertIn('id="workflowNodeSearch"', JS)
         self.assertIn('id="workflowNodeList"', JS)
-        self.assertIn("renderWorkflow(data.workflow_graph)", JS)
+        self.assertIn("renderWorkflow(data.workflow_graph, item)", JS)
         self.assertIn('classList.toggle("workflow-view", tab === "workflow")', JS)
 
     def test_nodes_panel_is_cleared_during_metadata_loading_and_failure(self):
@@ -159,7 +178,7 @@ class ViewerLayoutContractTests(unittest.TestCase):
         create_window = MAIN[MAIN.index("window = webview.create_window("):MAIN.index("try:", MAIN.index("window = webview.create_window("))]
         self.assertNotIn("text_select=True", create_window)
         self.assertIn("#detailsPanel, #nodesPanel, #rawPanel, .workflow-node { user-select: text; -webkit-user-select: text; }", CSS)
-        self.assertIn("::selection { background: rgba(119,114,255,.58); color: #fff; }", CSS)
+        self.assertIn("::selection { background: rgba(242,140,40,.58); color: #fff; }", CSS)
 
     def test_workflow_offers_one_selected_node_json_copy_action(self):
         self.assertEqual(JS.count('<button class="node-json" data-workflow-action="copy-node-json"'), 1)
@@ -215,10 +234,11 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn("body.theme-gloss.viewer-open .viewer", glass_css)
         self.assertIn("isolation: isolate", glass_css)
 
-    def test_readme_download_name_matches_the_release_version(self):
-        self.assertIn('__version__ = "1.0.8"', PACKAGE_INIT)
-        self.assertIn("LumaVault-1.0.8-Windows.zip", README)
-        self.assertNotIn("LumaVault-1.0.6-Windows.zip", README)
+    def test_readme_download_targets_latest_release_for_current_version(self):
+        self.assertIn('__version__ = "1.1.3"', PACKAGE_INIT)
+        self.assertIn("https://github.com/Flibens/LumaVault/releases/latest", README)
+        self.assertIn("LumaVault-1.1.3-Windows.zip", README)
+        self.assertNotIn("LumaVault-1.1.2-Windows.zip", README)
 
     def test_workflow_long_text_values_wrap_and_scroll_without_visual_truncation(self):
         self.assertIn('param.multiline ? "multiline" : ""', JS)

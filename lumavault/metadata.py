@@ -290,10 +290,10 @@ def _scan_bytes_for_workflow(content_bytes):
             candidates_examined += 1
             start_pos = start_index + 1
 
-def extract_workflow_from_file(file_path):
+def extract_workflow_payloads_from_file(file_path):
     """
     Extract workflow payload from image/video/audio files.
-    Returns (workflow_dict_or_none, 'ui'|'api'|None).
+    Return every embedded ComfyUI payload found, keyed by ``ui`` and/or ``api``.
     """
     found = {}
 
@@ -377,11 +377,52 @@ def extract_workflow_from_file(file_path):
         except Exception:
             pass
 
+    return found
+
+
+def extract_workflow_from_file(file_path):
+    """Return the preferred workflow payload while preserving the legacy API."""
+    found = extract_workflow_payloads_from_file(file_path)
     if 'ui' in found:
         return found['ui'], 'ui'
     if 'api' in found:
         return found['api'], 'api'
     return None, None
+
+
+def extract_media_dimensions(file_path):
+    """Read the encoded dimensions of the first video stream with ffprobe."""
+    ffprobe_bin = os.environ.get('FFPROBE_PATH') or shutil.which('ffprobe')
+    if not ffprobe_bin:
+        return {'width': None, 'height': None}
+    try:
+        cmd = [
+            ffprobe_bin, '-v', 'quiet', '-print_format', 'json',
+            '-select_streams', 'v:0', '-show_entries', 'stream=width,height',
+            str(file_path),
+        ]
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        with tempfile.TemporaryFile() as output:
+            subprocess.run(
+                cmd,
+                stdout=output,
+                stderr=subprocess.DEVNULL,
+                check=True,
+                timeout=15,
+                creationflags=creationflags,
+            )
+            output.seek(0)
+            probe = json.loads(output.read(64 * 1024).decode('utf-8', errors='ignore'))
+        streams = probe.get('streams', [])
+        stream = streams[0] if isinstance(streams, list) and streams else {}
+        width = stream.get('width') if isinstance(stream, dict) else None
+        height = stream.get('height') if isinstance(stream, dict) else None
+        return {
+            'width': width if isinstance(width, int) and width > 0 else None,
+            'height': height if isinstance(height, int) and height > 0 else None,
+        }
+    except Exception:
+        return {'width': None, 'height': None}
 
 def _parse_parameters_text(params_text, parsed):
     if not params_text or not isinstance(params_text, str):
@@ -633,6 +674,25 @@ def _bounded_join_text(parts, delimiter=''):
     return ''.join(pieces).strip() or None
 
 
+def _resolve_api_scalar(prompt_graph, value, visited=None):
+    """Resolve a primitive value through generic ComfyUI helper nodes."""
+    seen = set(visited or ())
+    current = value
+    for _ in range(WORKFLOW_MAX_NODES):
+        if not _is_link_ref(current):
+            return current
+        node_key = str(current[0])
+        if node_key in seen:
+            return None
+        seen.add(node_key)
+        node = prompt_graph.get(node_key)
+        inputs = node.get('inputs', {}) if isinstance(node, dict) else {}
+        if not isinstance(inputs, dict):
+            return None
+        current = next((inputs[name] for name in ('value', 'boolean', 'switch', 'index', 'number') if name in inputs), None)
+    return None
+
+
 def _resolve_api_text_iterative(
     prompt_graph, value, preferred_names=None, visited=None, showtext_snapshots=None,
 ):
@@ -708,7 +768,22 @@ def _resolve_api_text_iterative(
         bounded_inputs = dict(islice(inputs.items(), WORKFLOW_MAX_PORTS))
         active.add(node_key)
 
-        if 'stringconcatenate' in _node_type(ref_node).lower():
+        node_type_l = _node_type(ref_node).lower()
+        if 'switch' in node_type_l:
+            switch_value = _resolve_api_scalar(prompt_graph, bounded_inputs.get('switch'), active)
+            if isinstance(switch_value, str):
+                switch_value = switch_value.strip().lower() in {'true', '1', 'yes', 'on'}
+            branch_names = (
+                ('on_true', 'true', 'if_true') if bool(switch_value)
+                else ('on_false', 'false', 'if_false')
+            )
+            selected = next((bounded_inputs[name] for name in branch_names if name in bounded_inputs), None)
+            if selected is not None:
+                stack.append(('forward', node_key))
+                stack.append(('eval', selected))
+                continue
+
+        if 'stringconcatenate' in node_type_l:
             operands = [
                 bounded_inputs[name]
                 for name in sorted(bounded_inputs, key=str)
@@ -1129,6 +1204,13 @@ def parse_comfy_metadata(metadata):
                     if node_inputs.get('scheduler') is not None:
                         parsed['scheduler'] = node_inputs.get('scheduler')
 
+                # Guider/conditioning nodes encode the semantic role of otherwise
+                # identically titled CLIP text nodes. Follow those links before using
+                # title/order heuristics.
+                has_prompt_roles = is_sampling_node or (
+                    'positive' in node_inputs and 'negative' in node_inputs
+                )
+                if has_prompt_roles:
                     positive_text = _resolve_api_value(
                         prompt_graph, node_inputs.get('positive'),
                         ['text', 'prompt', 'positive', 'string_a', 'string'], 'text',
@@ -1195,9 +1277,12 @@ def parse_comfy_metadata(metadata):
                     if height_value is not None:
                         parsed['height'] = height_value
 
-                if any(kw in node_type_l for kw in ['cliptextencode', 'textencode', 'conditioning', 'prompt']):
+                if (
+                    any(kw in node_type_l for kw in ['cliptextencode', 'textencode', 'conditioning', 'prompt'])
+                    or any(key in node_inputs for key in ['text', 'prompt', 'positive', 'negative'])
+                ):
                     text = _extract_api_node_value(
-                        prompt_graph, node, ['text', 'prompt', 'string_a', 'string'], 'text',
+                        prompt_graph, node, ['text', 'prompt', 'positive', 'string_a', 'string'], 'text',
                         showtext_snapshots=showtext_snapshots,
                     )
                     if isinstance(text, str) and text.strip():
@@ -1411,7 +1496,7 @@ def build_workflow_graph(workflow_data, workflow_type):
                 result.append({"name": f"slot_{index + 1}", "type": ""})
                 continue
             result.append({
-                "name": graph_text(item.get("name") or f"slot_{index + 1}"),
+                "name": graph_text(item.get("label") or item.get("localized_name") or item.get("name") or f"slot_{index + 1}"),
                 "type": graph_text(item.get("type") or ""),
             })
         remaining_ports[0] -= len(result)
@@ -1575,8 +1660,19 @@ def build_workflow_graph(workflow_data, workflow_type):
     node_id_suffixes = {}
     link_id_suffixes = {}
 
+    definitions = workflow_data.get("definitions")
+    raw_subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else []
+    if not isinstance(raw_subgraphs, list):
+        raw_subgraphs = []
+    subgraph_definitions = {
+        graph_id(item.get("id")): item
+        for item in raw_subgraphs[:max_subgraphs]
+        if isinstance(item, dict) and item.get("id") is not None
+    }
+
     def normalize_ui_node(node, index, aliases, id_prefix="", subgraph_name=None):
         node_type = graph_text(node.get("type") or node.get("class_type") or "Unknown")
+        definition = subgraph_definitions.get(graph_id(node.get("type"))) if not id_prefix else None
         params = []
         for param in _normalize_node_params_from_ui_node(
             node,
@@ -1593,17 +1689,33 @@ def build_workflow_graph(workflow_data, workflow_type):
                         len(value) > 80 or "\n" in value or any(word in hint for word in ("text", "prompt", "caption"))
                     ),
                 })
+        if definition:
+            widget_values = node.get("widgets_values")
+            widget_values = widget_values if isinstance(widget_values, list) else []
+            semantic_params = []
+            definition_inputs = definition.get("inputs") if isinstance(definition.get("inputs"), list) else []
+            # ComfyUI serializes subgraph widget values in the same order as the
+            # definition's trailing scalar inputs. Boundary media ports do not have
+            # widget values, so align from the end instead of guessing from value_* names.
+            widget_ports = definition_inputs[-len(widget_values):] if widget_values else []
+            for widget_index, (port, widget_value) in enumerate(zip(widget_ports, widget_values)):
+                if not isinstance(port, dict):
+                    continue
+                name = port.get("label") or port.get("name") or f"widget_{widget_index + 1}"
+                semantic_params.append(graph_param(name, widget_value, node_type))
+            if semantic_params:
+                params = semantic_params[:max_params]
         scoped_id = f"{id_prefix}{graph_id(node.get('id', index))}"
         node_id = reserve_identifier(scoped_id, used_node_ids, node_id_suffixes)
         aliases.setdefault(scoped_id, node_id)
         normalized = {
             "id": node_id,
             "type": node_type,
-            "title": graph_text(node.get("title") or node.get("type") or node.get("class_type") or "Unknown"),
+            "title": graph_text(node.get("title") or (definition or {}).get("name") or node.get("type") or node.get("class_type") or "Unknown"),
             "position": pair(node.get("pos"), (index % 4 * 320, index // 4 * 250)),
             "size": pair(node.get("size"), (240, 150), 1, 10_000),
-            "inputs": slots(node.get("inputs")),
-            "outputs": slots(node.get("outputs")),
+            "inputs": slots((definition or {}).get("inputs") or node.get("inputs")),
+            "outputs": slots((definition or {}).get("outputs") or node.get("outputs")),
             "params": params,
             "mode": finite_number(node.get("mode", 0), 0),
             "color": graph_text(node.get("color")),
@@ -1671,10 +1783,7 @@ def build_workflow_graph(workflow_data, workflow_type):
     top_y = min((node["position"][1] for node in top_nodes), default=0.0)
     subgraph_x = top_right + 260.0
     subgraph_y = top_y
-    definitions = workflow_data.get("definitions")
-    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else []
-    if not isinstance(subgraphs, list):
-        subgraphs = []
+    subgraphs = raw_subgraphs
 
     used_subgraph_ids = set()
     subgraph_id_suffixes = {}

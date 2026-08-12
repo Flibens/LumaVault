@@ -659,7 +659,7 @@
     $$('[data-copy-lora]', $("#detailsPanel")).forEach(button => button.addEventListener("click", () => copyText(parsed.loras[Number(button.dataset.copyLora)]?.name, "LoRA name copied")));
     $('[data-copy-path]', $("#detailsPanel"))?.addEventListener("click", () => copyText(file.path, "Path copied"));
     renderNodeList(data.workflow_nodes || []);
-    renderWorkflow(data.workflow_graph);
+    renderWorkflow(data.workflow_graph, item);
     $("#rawPanel").innerHTML = `<section class="meta-section"><div class="meta-section-title"><span>Embedded metadata</span><button id="copyRawBtn">Copy JSON</button></div><pre class="raw-box">${escapeHtml(JSON.stringify(data.raw || {}, null, 2))}</pre></section>`;
     $("#copyRawBtn")?.addEventListener("click", () => copyText(JSON.stringify(data.raw || {}, null, 2), "Raw metadata copied"));
   }
@@ -698,23 +698,23 @@
 
   function workflowPortColor(type) {
     const value = String(type || "").toUpperCase();
-    if (value.includes("MODEL")) return "#b985ff";
+    if (value.includes("MODEL")) return "#f6a54b";
     if (value.includes("CLIP")) return "#f1c75b";
     if (value.includes("CONDITION")) return "#f28b68";
     if (value.includes("LATENT")) return "#ff78b7";
     if (value.includes("IMAGE")) return "#61d5e8";
     if (value.includes("MASK")) return "#79d69f";
     if (value.includes("VAE")) return "#ef8fbd";
-    return "#8d89ff";
+    return "#f59e3d";
   }
 
   function workflowNodeAccent(type) {
     const value = String(type || "").toLowerCase();
-    if (value.includes("sampler")) return "#7772ff";
-    if (value.includes("loader") || value.includes("checkpoint")) return "#b985ff";
+    if (value.includes("sampler")) return "#f28c28";
+    if (value.includes("loader") || value.includes("checkpoint")) return "#f6a54b";
     if (value.includes("text") || value.includes("prompt") || value.includes("clip")) return "#e69a65";
     if (value.includes("image") || value.includes("latent") || value.includes("vae")) return "#48bfd3";
-    return "#7772ff";
+    return "#f28c28";
   }
 
   function workflowParamHeight(params) {
@@ -759,7 +759,39 @@
     applyWorkflowTransform();
   }
 
-  function renderWorkflow(graph) {
+  function workflowRectanglesOverlap(left, right, gap = 12) {
+    return left.x < right.x + right.width + gap && left.x + left.width + gap > right.x
+      && left.y < right.y + right.height + gap && left.y + left.height + gap > right.y;
+  }
+
+  function resolveWorkflowNodeCollision(node, nodes) {
+    for (let attempt = 0; attempt < nodes.length * 2 + 1; attempt += 1) {
+      const blocker = nodes.find(other => other !== node && workflowRectanglesOverlap(node, other));
+      if (!blocker) break;
+      const right = { x: blocker.x + blocker.width + 12, y: node.y };
+      const below = { x: node.x, y: blocker.y + blocker.height + 12 };
+      Object.assign(node, Math.abs(right.x - node.x) <= Math.abs(below.y - node.y) ? right : below);
+    }
+    return node;
+  }
+
+  function workflowLinkPath(link, nodeMap) {
+    const from = nodeMap.get(String(link.from_node));
+    const to = nodeMap.get(String(link.to_node));
+    if (!from || !to) return "";
+    const fromRow = from.outputRowBySlot.get(Number(link.from_slot || 0));
+    const toRow = to.inputRowBySlot.get(Number(link.to_slot || 0));
+    if (fromRow === undefined || toRow === undefined) return "";
+    const x1 = from.x + from.width;
+    const y1 = from.y + 48 + fromRow * 22;
+    const x2 = to.x;
+    const y2 = to.y + 48 + toRow * 22;
+    const curve = Math.max(64, Math.abs(x2 - x1) * .48);
+    return `M ${x1} ${y1} C ${x1 + curve} ${y1}, ${x2 - curve} ${y2}, ${x2} ${y2}`;
+  }
+
+  function renderWorkflow(graph, item = currentViewerItem()) {
+    const layoutMode = graph?._layoutMode || "original";
     const panel = $("#workflowPanel");
     const sourceNodes = Array.isArray(graph?.nodes) ? graph.nodes.slice(0, 5000) : [];
     if (!sourceNodes.length) {
@@ -803,9 +835,10 @@
       const inputs = compactPorts(rawInputs, inputRequired);
       const outputs = compactPorts(rawOutputs, outputRequired);
       remainingWorkflowDomRecords = Math.max(0, remainingWorkflowDomRecords - Math.max(inputs.length, outputs.length));
+      const mediaPreviews = window.LumaVaultWorkflowMedia?.workflowMediaPreviews(node, item) || [];
       const savedX = Number(node.position?.[0]);
       const savedY = Number(node.position?.[1]);
-      const contentHeight = 48 + Math.max(inputs.length, outputs.length) * 22 + parameterHeight;
+      const contentHeight = 48 + Math.max(inputs.length, outputs.length) * 22 + parameterHeight + mediaPreviews.length * 112;
       return {
         ...node,
         workflowSourceIndex: index,
@@ -815,7 +848,7 @@
         ],
         width: 264,
         height: Math.max(82, contentHeight),
-        inputs, outputs, params,
+        inputs, outputs, params, mediaPreviews,
         inputRowBySlot: new Map(inputs.map((port, row) => [port.originalSlot, row])),
         outputRowBySlot: new Map(outputs.map((port, row) => [port.originalSlot, row]))
       };
@@ -833,9 +866,12 @@
         height: Number.isFinite(height) && height > 0 ? height : 220
       };
     });
-    const compactLayout = window.LumaVaultWorkflowLayout.compactWorkflowLayout(prepared, sourceLinks, preparedGroups);
-    prepared = compactLayout.nodes;
-    preparedGroups = compactLayout.groups;
+    const layoutFunction = layoutMode === "arranged"
+      ? window.LumaVaultWorkflowLayout.compactWorkflowLayout
+      : window.LumaVaultWorkflowLayout.sourceWorkflowLayout;
+    const workflowLayout = layoutFunction(prepared, sourceLinks, preparedGroups);
+    prepared = workflowLayout.nodes;
+    preparedGroups = workflowLayout.groups;
     let contentWidth = 0;
     let contentHeight = 0;
     for (const node of prepared) {
@@ -851,6 +887,7 @@
     const nodeMap = new Map(prepared.map(node => [String(node.id), node]));
 
     const renderedLinks = [];
+    const renderedLinkSources = [];
     for (const link of sourceLinks) {
       if (remainingWorkflowDomRecords <= 0) break;
       const from = nodeMap.get(String(link.from_node));
@@ -861,13 +898,9 @@
       const fromRow = from.outputRowBySlot.get(fromSlot);
       const toRow = to.inputRowBySlot.get(toSlot);
       if (fromRow === undefined || toRow === undefined) continue;
-      const x1 = from.x + from.width;
-      const y1 = from.y + 48 + fromRow * 22;
-      const x2 = to.x;
-      const y2 = to.y + 48 + toRow * 22;
-      const curve = Math.max(64, Math.abs(x2 - x1) * .48);
       const color = workflowPortColor(link.type);
-      renderedLinks.push(`<path class="workflow-link" d="M ${x1} ${y1} C ${x1 + curve} ${y1}, ${x2 - curve} ${y2}, ${x2} ${y2}" style="--link-color:${color}"></path>`);
+      renderedLinks.push(`<path class="workflow-link" d="${workflowLinkPath(link, nodeMap)}" style="--link-color:${color}"></path>`);
+      renderedLinkSources.push(link);
       remainingWorkflowDomRecords -= 1;
     }
     const links = renderedLinks.join("");
@@ -886,18 +919,30 @@
           <span class="workflow-slot output ${output ? "" : "empty"}">${output ? `<b title="${escapeHtml(output.name)}">${escapeHtml(output.name)}</b><i style="--port-color:${workflowPortColor(output.type)}"></i>` : ""}</span>
         </div>`;
       }).join("");
+      const previews = window.LumaVaultWorkflowMedia?.workflowMediaPreviews(node, item) || [];
+      const previewMarkup = previews.map((preview, previewIndex) => {
+        const previewUrl = preview.current
+          ? (preview.role === "output" && item?.kind === "video" ? mediaUrl(item, true) : mediaUrl(item))
+          : queryUrl("/api/workflow-input", { source: item.source_id, path: item.path, input: preview.path });
+        const copyButton = preview.role === "input"
+          ? `<button type="button" data-workflow-copy-input="${previewIndex}" title="Copy input image" aria-label="Copy input image">${icon("copy")}</button>`
+          : "";
+        return `<figure class="workflow-node-preview" data-workflow-preview="${escapeHtml(preview.role)}"><img src="${escapeHtml(previewUrl)}" alt="${escapeHtml(preview.label)}" loading="lazy"><figcaption>${escapeHtml(preview.label)}${copyButton}</figcaption></figure>`;
+      }).join("");
       const params = node.params.length ? `<div class="workflow-node-params">${node.params.map(param => `<div class="${param.multiline ? "multiline" : ""}"><b title="${escapeHtml(param.name)}">${escapeHtml(param.name)}</b><span ${param.multiline ? "" : `title="${escapeHtml(param.value)}"`}>${escapeHtml(param.value)}</span></div>`).join("")}</div>` : "";
       return `<article class="workflow-node ${Number(node.mode) !== 0 ? "muted" : ""}" data-workflow-node="${escapeHtml(node.id)}" data-workflow-source-index="${node.workflowSourceIndex}" style="left:${node.x}px;top:${node.y}px;width:${node.width}px;height:${node.height}px;--node-accent:${workflowNodeAccent(node.type)}">
         <header><span></span><strong title="${escapeHtml(node.title || node.type)}">${escapeHtml(node.title || node.type || "Unknown")}</strong><small>#${escapeHtml(node.id)}</small></header>
-        <div class="workflow-node-body">${rows}${params}</div>
+        <div class="workflow-node-body">${rows}${previewMarkup}${params}</div>
       </article>`;
     }).join("");
 
-    const graphLabel = `${graph.kind === "api" ? "API GRAPH" : "COMFYUI GRAPH"} · COMPACT AUTO-LAYOUT`;
+    const graphLabel = `${graph.kind === "api" ? "API GRAPH" : "COMFYUI GRAPH"} · ${layoutMode === "arranged" ? "ARRANGED" : "ORIGINAL"} LAYOUT`;
     panel.innerHTML = `<div class="workflow-graph">
       <div class="workflow-toolbar">
         <div class="workflow-summary"><span>${graphLabel}</span><strong>${prepared.length} NODES · ${renderedLinks.length} LINKS</strong></div>
         <div class="workflow-controls">
+          <button data-workflow-action="layout-original" title="Restore original node positions">Original</button>
+          <button data-workflow-action="layout-arrange" title="Arrange nodes by connection flow">Arrange</button>
           <button data-workflow-action="zoom-out" title="Zoom out">${icon("minus")}</button>
           <output id="workflowZoomValue">100%</output>
           <button data-workflow-action="zoom-in" title="Zoom in">${icon("plus")}</button>
@@ -924,6 +969,8 @@
         const view = state.workflowView;
         const sourceNode = Number.isInteger(view?.selectedSourceIndex) ? view.sourceNodes[view.selectedSourceIndex] : null;
         if (sourceNode) copyText(JSON.stringify(sourceNode, null, 2), "Node JSON copied");
+      } else if (action === "layout-original" || action === "layout-arrange") {
+        renderWorkflow({ ...graph, _layoutMode: action === "layout-arrange" ? "arranged" : "original" }, item);
       } else if (action === "fit") fitWorkflowGraph();
       else zoomWorkflow(action === "zoom-in" ? 1.2 : 1 / 1.2);
     }));
@@ -954,12 +1001,50 @@
     canvas.addEventListener("pointerup", endPan);
     canvas.addEventListener("pointercancel", endPan);
     canvas.addEventListener("dblclick", event => { if (!event.target.closest(".workflow-node")) fitWorkflowGraph(); });
+    let workflowNodeDrag = null;
+    $$(".workflow-node", panel).forEach(element => {
+      element.addEventListener("pointerdown", event => {
+        if (event.button !== 0 || !event.target.closest("header")) return;
+        const node = nodeMap.get(String(element.dataset.workflowNode));
+        workflowNodeDrag = { node, element, pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY, x: node.x, y: node.y };
+        element.setPointerCapture(event.pointerId);
+        element.classList.add("dragging");
+        event.preventDefault();
+      });
+      element.addEventListener("pointermove", event => {
+        if (!workflowNodeDrag || workflowNodeDrag.pointerId !== event.pointerId) return;
+        const view = state.workflowView;
+        workflowNodeDrag.node.x = workflowNodeDrag.x + (event.clientX - workflowNodeDrag.clientX) / view.scale;
+        workflowNodeDrag.node.y = workflowNodeDrag.y + (event.clientY - workflowNodeDrag.clientY) / view.scale;
+        workflowNodeDrag.element.style.left = `${workflowNodeDrag.node.x}px`;
+        workflowNodeDrag.element.style.top = `${workflowNodeDrag.node.y}px`;
+        $$(".workflow-link", panel).forEach((path, index) => path.setAttribute("d", workflowLinkPath(renderedLinkSources[index], nodeMap)));
+      });
+      const endWorkflowNodeDrag = event => {
+        if (!workflowNodeDrag || workflowNodeDrag.pointerId !== event.pointerId) return;
+        resolveWorkflowNodeCollision(workflowNodeDrag.node, prepared);
+        workflowNodeDrag.element.style.left = `${workflowNodeDrag.node.x}px`;
+        workflowNodeDrag.element.style.top = `${workflowNodeDrag.node.y}px`;
+        $$(".workflow-link", panel).forEach((path, index) => path.setAttribute("d", workflowLinkPath(renderedLinkSources[index], nodeMap)));
+        workflowNodeDrag.element.classList.remove("dragging");
+        workflowNodeDrag = null;
+      };
+      element.addEventListener("pointerup", endWorkflowNodeDrag);
+      element.addEventListener("pointercancel", endWorkflowNodeDrag);
+    });
     $$(".workflow-node", panel).forEach(node => node.addEventListener("click", () => {
       $$(".workflow-node", panel).forEach(row => row.classList.toggle("selected", row === node));
       const view = state.workflowView;
       view.selectedSourceIndex = Number(node.dataset.workflowSourceIndex);
       const copyButton = $('[data-workflow-action="copy-node-json"]', panel);
       copyButton.disabled = !Number.isInteger(view.selectedSourceIndex);
+    }));
+    $$('[data-workflow-copy-input]', panel).forEach(button => button.addEventListener("click", event => {
+      event.stopPropagation();
+      const nodeElement = button.closest(".workflow-node");
+      const node = nodeMap.get(String(nodeElement?.dataset.workflowNode));
+      const preview = node?.mediaPreviews?.[Number(button.dataset.workflowCopyInput)];
+      if (preview?.role === "input") copyWorkflowInputImage(item, preview.path);
     }));
     if ($("#viewer").classList.contains("workflow-view")) requestAnimationFrame(fitWorkflowGraph);
   }
@@ -1117,9 +1202,9 @@
     }
   }
 
-  async function browserClipboardImage(item) {
+  async function browserClipboardImageUrl(url) {
     if (!navigator.clipboard?.write || typeof ClipboardItem === "undefined") throw new Error("Image clipboard access is unavailable");
-    const response = await fetch(mediaUrl(item));
+    const response = await fetch(url);
     if (!response.ok) throw new Error("Image could not be loaded");
     const sourceBlob = await response.blob();
     let pngBlob = sourceBlob;
@@ -1133,6 +1218,22 @@
       pngBlob = await new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error("Image could not be converted")), "image/png"));
     }
     await navigator.clipboard.write([new ClipboardItem({ "image/png": pngBlob })]);
+  }
+
+  async function browserClipboardImage(item) { return browserClipboardImageUrl(mediaUrl(item)); }
+
+  async function copyWorkflowInputImage(item, inputPath) {
+    if (!item || !inputPath) return;
+    try {
+      if (window.pywebview?.api?.copy_workflow_input) {
+        const result = await window.pywebview.api.copy_workflow_input(item.source_id, item.path, inputPath);
+        if (!result?.success) throw new Error(result?.error || "Input image could not be copied");
+      } else {
+        const url = queryUrl("/api/workflow-input", { source: item.source_id, path: item.path, input: inputPath });
+        await browserClipboardImageUrl(url);
+      }
+      toast("Input image copied");
+    } catch (error) { toast(error.message || "Input image could not be copied", "error"); }
   }
 
   async function copyImage(item) {

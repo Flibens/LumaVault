@@ -11,8 +11,9 @@ from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
 import lumavault.metadata as metadata_module
-from lumavault.app import VaultState, create_app
+from lumavault.app import VaultState, create_app, file_generation_metadata
 from lumavault.metadata import (
+    _resolve_api_value,
     _scan_bytes_for_workflow,
     build_workflow_graph,
     extract_workflow_from_file,
@@ -561,6 +562,172 @@ class LumaVaultAppTests(unittest.TestCase):
         }})
         self.assertEqual(parsed["prompt"], "sunlit forest")
         self.assertEqual(parsed["negative_prompt"], "low quality")
+
+    def test_linked_guider_roles_override_ambiguous_clip_text_titles(self):
+        prompt = {
+            "negative": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": "blurry, low quality"},
+                "_meta": {"title": "CLIP Text Encode (Prompt)"},
+            },
+            "positive": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": "a cathedral singer beneath golden light"},
+                "_meta": {"title": "CLIP Text Encode (Prompt)"},
+            },
+            "conditioning": {
+                "class_type": "LTXVConditioning",
+                "inputs": {"positive": ["positive", 0], "negative": ["negative", 0]},
+            },
+            "guider": {
+                "class_type": "CFGGuider",
+                "inputs": {"positive": ["conditioning", 0], "negative": ["conditioning", 1]},
+            },
+        }
+
+        parsed = parse_comfy_metadata({"prompt": prompt})
+
+        self.assertEqual(parsed["prompt"], "a cathedral singer beneath golden light")
+        self.assertEqual(parsed["negative_prompt"], "blurry, low quality")
+
+    def test_minimax_h3_resolves_linked_easy_positive_prompt(self):
+        prompt = {
+            "source": {
+                "class_type": "easy positive",
+                "inputs": {"positive": "the chef plates carbonara, then looks up"},
+                "_meta": {"title": "Positive"},
+            },
+            "conditioning": {
+                "class_type": "MiniMaxH3ImageToVideo",
+                "inputs": {"prompt": ["source", 0], "width": 576, "height": 1024},
+            },
+            "guider": {
+                "class_type": "BasicGuider",
+                "inputs": {"conditioning": ["conditioning", 0]},
+            },
+        }
+
+        parsed = parse_comfy_metadata({"prompt": prompt})
+
+        self.assertEqual(parsed["prompt"], "the chef plates carbonara, then looks up")
+
+    def test_semantic_prompt_resolution_follows_boolean_switches(self):
+        prompt = {
+            "raw": {"class_type": "PrimitiveStringMultiline", "inputs": {"value": "true scene prompt"}},
+            "enhanced": {"class_type": "TextGeneratePrompt", "inputs": {"prompt": ["raw", 0]}},
+            "enabled": {"class_type": "PrimitiveBoolean", "inputs": {"value": True}},
+            "switch": {
+                "class_type": "ComfySwitchNode",
+                "inputs": {"switch": ["enabled", 0], "on_false": ["raw", 0], "on_true": ["enhanced", 0]},
+            },
+            "positive": {"class_type": "CLIPTextEncode", "inputs": {"text": ["switch", 0]}},
+            "negative": {"class_type": "CLIPTextEncode", "inputs": {"text": "cartoon, ugly"}},
+            "conditioning": {
+                "class_type": "Conditioning",
+                "inputs": {"positive": ["positive", 0], "negative": ["negative", 0]},
+            },
+        }
+
+        parsed = parse_comfy_metadata({"prompt": prompt})
+
+        self.assertEqual(
+            _resolve_api_value(prompt, ["switch", 0], ["text", "prompt", "positive"], "text"),
+            "true scene prompt",
+        )
+        self.assertEqual(parsed["prompt"], "true scene prompt")
+        self.assertEqual(parsed["negative_prompt"], "cartoon, ugly")
+
+    def test_subgraph_instance_uses_definition_title_labels_and_widget_values(self):
+        subgraph_id = "subgraph-uuid"
+        workflow = {
+            "nodes": [{
+                "id": 10,
+                "type": subgraph_id,
+                "pos": [100, 200],
+                "inputs": [
+                    {"name": "input", "label": "first_frame", "type": "IMAGE"},
+                    {"name": "value", "label": "prompt", "type": "STRING", "widget": {"name": "value"}},
+                ],
+                "outputs": [{"name": "VIDEO", "type": "VIDEO"}],
+                "widgets_values": ["a long cinematic prompt"],
+            }],
+            "links": [],
+            "definitions": {"subgraphs": [{
+                "id": subgraph_id,
+                "name": "Image to Video (Future Model)",
+                "nodes": [],
+                "inputs": [
+                    {"name": "input", "label": "first_frame", "type": "IMAGE"},
+                    {"name": "value", "label": "prompt", "type": "STRING"},
+                ],
+                "outputs": [{"name": "VIDEO", "type": "VIDEO"}],
+            }]},
+        }
+
+        graph = build_workflow_graph(workflow, "ui")
+        instance = next(node for node in graph["nodes"] if node["id"] == "10")
+
+        self.assertEqual(instance["title"], "Image to Video (Future Model)")
+        self.assertEqual([port["name"] for port in instance["inputs"]], ["first_frame", "prompt"])
+        self.assertTrue(any(param["name"] == "prompt" and param["value"] == "a long cinematic prompt" for param in instance["params"]))
+
+    def test_video_generation_metadata_keeps_ui_and_api_payloads(self):
+        ui = {"nodes": [{"id": 1, "type": "SaveVideo"}], "links": []}
+        api = {
+            "positive": {"class_type": "easy positive", "inputs": {"positive": "useful prompt"}},
+        }
+        media = self.media / "dual-payload.mp4"
+        media.write_bytes(b"not a real video")
+
+        with mock.patch(
+            "lumavault.app.extract_workflow_payloads_from_file",
+            return_value={"ui": ui, "api": api},
+        ):
+            raw, workflow, workflow_type, parsed = file_generation_metadata(media)
+
+        self.assertEqual(raw["workflow"], ui)
+        self.assertEqual(raw["prompt"], api)
+        self.assertEqual((workflow, workflow_type), (ui, "ui"))
+        self.assertEqual(parsed["prompt"], "useful prompt")
+
+    def test_video_metadata_endpoint_reports_encoded_dimensions(self):
+        media = self.media / "dimensions.mp4"
+        media.write_bytes(b"not a real video")
+
+        with mock.patch("lumavault.app.extract_workflow_payloads_from_file", return_value={}), mock.patch(
+            "lumavault.app.extract_media_dimensions", return_value={"width": 1280, "height": 704}
+        ):
+            response = self.client.get("/api/metadata?source=test&path=dimensions.mp4")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["dimensions"], {"width": 1280, "height": 704})
+        self.assertEqual(payload["parsed"]["width"], 1280)
+        self.assertEqual(payload["parsed"]["height"], 704)
+
+    def test_workflow_input_preview_resolves_comfy_input_beside_output_source(self):
+        comfy_root = Path(self.temp.name) / "ComfyUI"
+        output = comfy_root / "output" / "video"
+        input_dir = comfy_root / "input" / "pasted"
+        output.mkdir(parents=True)
+        input_dir.mkdir(parents=True)
+        media = output / "result.mp4"
+        media.write_bytes(b"video")
+        image = input_dir / "image.png"
+        Image.new("RGB", (16, 16), "red").save(image)
+        state = VaultState(self.data)
+        source = state.add_source(str(output), "Video", False)
+        client = create_app(state).test_client()
+
+        response = client.get(f"/api/workflow-input?source={source['id']}&path=result.mp4&input=pasted/image.png")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "image/png")
+        response.close()
+
+    def test_workflow_input_preview_rejects_escape_paths(self):
+        response = self.client.get("/api/workflow-input?source=test&path=sample.png&input=../secret.png")
+        self.assertIn(response.status_code, (400, 404))
 
     def test_raw_workflow_fallback_is_quote_aware_and_never_reads_the_whole_file(self):
         embedded = json.dumps({
