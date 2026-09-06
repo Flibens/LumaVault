@@ -235,10 +235,18 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn("isolation: isolate", glass_css)
 
     def test_readme_download_targets_latest_release_for_current_version(self):
-        self.assertIn('__version__ = "1.1.4"', PACKAGE_INIT)
+        self.assertIn('__version__ = "1.1.5"', PACKAGE_INIT)
         self.assertIn("https://github.com/Flibens/LumaVault/releases/latest", README)
-        self.assertIn("LumaVault-1.1.4-Windows.zip", README)
+        self.assertIn("LumaVault-1.1.5-Windows.zip", README)
         self.assertNotIn("LumaVault-1.1.2-Windows.zip", README)
+
+    def test_windows_package_allows_pythonnet_from_downloaded_archives(self):
+        config_path = ROOT / "assets" / "LumaVault.exe.config"
+        self.assertTrue(config_path.is_file())
+        config = config_path.read_text(encoding="utf-8")
+        self.assertIn('<loadFromRemoteSources enabled="true"/>', config)
+        build_script = (ROOT / "build.bat").read_text(encoding="utf-8")
+        self.assertIn('copy /Y "assets\\LumaVault.exe.config" "dist\\LumaVault\\LumaVault.exe.config"', build_script)
 
     def test_workflow_long_text_values_wrap_and_scroll_without_visual_truncation(self):
         self.assertIn('param.multiline ? "multiline" : ""', JS)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import importlib
 import io
 import os
 import socket
@@ -149,6 +150,13 @@ def free_port(preferred: int = 38471) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _check_native_backend() -> bool:
+    """Initialize the packaged Windows WebView backend without creating a window."""
+    guilib = importlib.import_module("webview.guilib")
+    guilib.initialize()
+    return True
 
 
 class ServerThread(threading.Thread):
@@ -305,7 +313,12 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=0, help="Local server port")
     parser.add_argument("--data-dir", type=Path, help="Override the persistent data directory")
     parser.add_argument("--debug", action="store_true", help="Enable webview developer tools")
+    parser.add_argument("--check-native-backend", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.check_native_backend:
+        _check_native_backend()
+        return 0
 
     state = VaultState(data_dir=args.data_dir)
     app = create_app(state)

@@ -1,15 +1,25 @@
 import struct
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
 from PIL import Image
 
+import main
 from main import NativeApi, _image_clipboard_payloads
 
 
 class NativeClipboardTests(unittest.TestCase):
+    def test_native_backend_check_initializes_pywebview_without_creating_a_window(self):
+        initialize = unittest.mock.Mock()
+        fake_guilib = SimpleNamespace(initialize=initialize)
+        with patch("main.importlib.import_module", return_value=fake_guilib) as import_module:
+            self.assertTrue(main._check_native_backend())
+        import_module.assert_called_once_with("webview.guilib")
+        initialize.assert_called_once_with()
+
     def test_image_payload_contains_windows_dib_and_original_file_drop(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "sample.png"

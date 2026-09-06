@@ -10,6 +10,12 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
+copy /Y "assets\LumaVault.exe.config" "dist\LumaVault\LumaVault.exe.config"
+if errorlevel 1 (
+  echo Build failed while copying the .NET runtime configuration.
+  pause
+  exit /b 1
+)
 echo.
 echo Built: %CD%\dist\LumaVault\LumaVault.exe
 pause
