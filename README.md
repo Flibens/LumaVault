@@ -38,7 +38,7 @@ A polished, standalone Windows media browser for ComfyUI outputs and other creat
 
 ## Windows download
 
-Download `LumaVault-1.1.3-Windows.zip` from the [latest release](https://github.com/Flibens/LumaVault/releases/latest), extract it, and run:
+Download `LumaVault-1.1.4-Windows.zip` from the [latest release](https://github.com/Flibens/LumaVault/releases/latest), extract it, and run:
 
 ```text
 LumaVault\LumaVault.exe

@@ -235,9 +235,9 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn("isolation: isolate", glass_css)
 
     def test_readme_download_targets_latest_release_for_current_version(self):
-        self.assertIn('__version__ = "1.1.3"', PACKAGE_INIT)
+        self.assertIn('__version__ = "1.1.4"', PACKAGE_INIT)
         self.assertIn("https://github.com/Flibens/LumaVault/releases/latest", README)
-        self.assertIn("LumaVault-1.1.3-Windows.zip", README)
+        self.assertIn("LumaVault-1.1.4-Windows.zip", README)
         self.assertNotIn("LumaVault-1.1.2-Windows.zip", README)
 
     def test_workflow_long_text_values_wrap_and_scroll_without_visual_truncation(self):
