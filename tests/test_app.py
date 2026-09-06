@@ -939,7 +939,10 @@ class LumaVaultAppTests(unittest.TestCase):
 
         shared = json.loads(shared_file.read_text(encoding="utf-8"))
         self.assertEqual(shared["favorites"], ["default:sample.png"])
-        self.assertEqual(shared["folders"], [{"id": second.data["sources"][1]["id"], "name": "Album", "path": str(album)}])
+        self.assertEqual(len(shared["folders"]), 1)
+        self.assertEqual(shared["folders"][0]["id"], second.data["sources"][1]["id"])
+        self.assertEqual(shared["folders"][0]["name"], "Album")
+        self.assertTrue(os.path.samefile(shared["folders"][0]["path"], album))
 
     def test_favorite_and_thumbnail(self):
         favorite = self.client.post("/api/favorite", json={"source_id": "test", "path": "sample.png"})
