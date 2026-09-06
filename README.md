@@ -19,7 +19,7 @@ A polished, standalone Windows media browser for ComfyUI outputs and other creat
 - Fast gallery for images, videos, and audio
 - Search, sorting, media filters, adjustable thumbnail size, and infinite loading
 - Multiple source folders with optional recursive scanning
-- Favorites with automatic one-time migration from ComfyUI Image Browser
+- Favorites and custom folders shared live with ComfyUI Image Browser
 - Image viewer with zoom, pan, keyboard navigation, and correctly contained portrait images
 - Video and audio playback with fully visible native controls
 - Detailed ComfyUI metadata: prompts, seed, model, sampler, scheduler, dimensions, and LoRAs
@@ -72,13 +72,19 @@ LumaVault stores its settings and thumbnail cache in:
 %LOCALAPPDATA%\LumaVault
 ```
 
-On first launch, it imports existing folders and favorites from:
+LumaVault and ComfyUI Image Browser share folders and favorites through:
+
+```text
+%LOCALAPPDATA%\LumaVault\shared-comfyui-image-browser.json
+```
+
+On the first update, LumaVault's saved state seeds this common local file. Afterwards, adding/removing a custom folder or toggling a favorite in either app is available to the other app on its next request or refresh. The shared file contains only folder definitions and favorite IDs; it never stores embedded media metadata, prompts, or workflows.
+
+The legacy ComfyUI Image Browser files remain available as compatibility fallbacks:
 
 ```text
 C:\Comfy\ComfyUI\user\comfyui-image-browser
 ```
-
-The legacy files are read but not modified.
 
 ## Development
 

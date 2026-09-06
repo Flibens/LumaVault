@@ -8,9 +8,11 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +36,7 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".mkv", ".avi"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac"}
 MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
-METADATA_INDEX_VERSION = 1
+METADATA_INDEX_VERSION = 3
 SEARCH_FIELDS = {"filename", "prompt", "lora", "model", "all"}
 SEARCH_QUERY_MAX_LENGTH = 500
 SEARCH_TEXT_MAX_LENGTH = 40_000
@@ -67,9 +69,93 @@ def json_read(path: Path, fallback: Any) -> Any:
 
 def json_write(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
-    temporary.replace(path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(value, handle, indent=2, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+SHARED_BROWSER_STATE_FILE = "shared-comfyui-image-browser.json"
+_SHARED_STATE_THREAD_LOCK = threading.RLock()
+_SHARED_STATE_LOCK_DEPTH = threading.local()
+
+
+@contextmanager
+def shared_state_file_lock(path: Path):
+    depth = getattr(_SHARED_STATE_LOCK_DEPTH, "value", 0)
+    if depth:
+        _SHARED_STATE_LOCK_DEPTH.value = depth + 1
+        try:
+            yield
+        finally:
+            _SHARED_STATE_LOCK_DEPTH.value = depth
+        return
+
+    with _SHARED_STATE_THREAD_LOCK:
+        lock_path = path.with_suffix(path.suffix + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "a+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            _SHARED_STATE_LOCK_DEPTH.value = 1
+            try:
+                yield
+            finally:
+                _SHARED_STATE_LOCK_DEPTH.value = 0
+                handle.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def normalized_shared_collections(value: Any) -> dict[str, list[Any]] | None:
+    if not isinstance(value, dict):
+        return None
+    raw_folders = value.get("folders", [])
+    raw_favorites = value.get("favorites", [])
+    if not isinstance(raw_folders, list) or not isinstance(raw_favorites, list):
+        return None
+    folders: list[dict[str, str]] = []
+    known_ids: set[str] = set()
+    for folder in raw_folders:
+        if not isinstance(folder, dict):
+            continue
+        folder_id = str(folder.get("id") or "").strip()
+        name = str(folder.get("name") or "").strip()
+        path = str(folder.get("path") or "").strip()
+        if not folder_id or folder_id == "default" or not name or not path or folder_id in known_ids:
+            continue
+        folders.append({"id": folder_id, "name": name, "path": path})
+        known_ids.add(folder_id)
+    favorites = list(dict.fromkeys(
+        str(item).strip() for item in raw_favorites
+        if isinstance(item, str) and str(item).strip()
+    ))
+    return {"folders": folders, "favorites": favorites}
 
 
 def media_kind(path: Path) -> str:
@@ -107,6 +193,11 @@ class VaultState:
         self.data_dir = (data_dir or default_data_dir()).resolve()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.data_dir / "state.json"
+        override = os.environ.get("LUMAVAULT_SHARED_BROWSER_STATE_FILE")
+        self.shared_browser_state_file = (
+            Path(override).expanduser().resolve()
+            if override else self.data_dir / SHARED_BROWSER_STATE_FILE
+        )
         self.thumb_dir = self.data_dir / "thumbnails"
         self.metadata_index_file = self.data_dir / "metadata-index.json"
         self.thumb_dir.mkdir(parents=True, exist_ok=True)
@@ -114,6 +205,7 @@ class VaultState:
         self._metadata_lock = threading.RLock()
         self._scan_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self.data = self._load_or_initialize(migrate_legacy)
+        self._initialize_shared_browser_collections()
         self._metadata_index = self._load_metadata_index()
 
     def _load_metadata_index(self) -> dict[str, Any]:
@@ -190,15 +282,99 @@ class VaultState:
         json_write(self.state_file, data)
         return data
 
-    def save(self) -> None:
+    def save(self, shared_fields: tuple[str, ...] = ("folders", "favorites")) -> None:
         with self.lock:
             json_write(self.state_file, self.data)
+            if shared_fields:
+                self._write_shared_browser_collections(shared_fields)
+
+    def _shared_payload_from_data(self) -> dict[str, list[Any]]:
+        folders = []
+        seen_ids: set[str] = set()
+        for source in self.data.get("sources", []):
+            if not isinstance(source, dict):
+                continue
+            source_id = str(source.get("id") or "").strip()
+            name = str(source.get("name") or "").strip()
+            path = str(source.get("path") or "").strip()
+            if not source_id or source_id == "default" or not name or not path or source_id in seen_ids:
+                continue
+            folders.append({"id": source_id, "name": name, "path": path})
+            seen_ids.add(source_id)
+        favorites = list(dict.fromkeys(
+            str(item).strip() for item in self.data.get("favorites", [])
+            if isinstance(item, str) and str(item).strip()
+        ))
+        return {"folders": folders, "favorites": favorites}
+
+    def _write_shared_browser_collections(self, fields: tuple[str, ...] = ("folders", "favorites")) -> None:
+        payload = self._shared_payload_from_data()
+        with shared_state_file_lock(self.shared_browser_state_file):
+            shared = normalized_shared_collections(json_read(self.shared_browser_state_file, None))
+            if shared is None:
+                shared = {"folders": [], "favorites": []}
+            for field in fields:
+                if field in payload:
+                    shared[field] = payload[field]
+            json_write(self.shared_browser_state_file, {"version": 1, **shared})
+
+    def _apply_shared_browser_collections(self, payload: dict[str, list[Any]]) -> bool:
+        existing_sources = {
+            str(source.get("id")): source
+            for source in self.data.get("sources", [])
+            if isinstance(source, dict) and source.get("id")
+        }
+        sources = []
+        if "default" in existing_sources:
+            sources.append(dict(existing_sources["default"]))
+        sources.extend(
+            {
+                "id": folder["id"],
+                "name": folder["name"],
+                "path": folder["path"],
+                "recursive": bool(existing_sources.get(folder["id"], {}).get("recursive", False)),
+            }
+            for folder in payload["folders"]
+        )
+        if not sources:
+            sources.append({
+                "id": "default",
+                "name": "ComfyUI Output",
+                "path": str(self._default_source_path()),
+                "recursive": False,
+            })
+        changed = self.data.get("sources") != sources or self.data.get("favorites") != payload["favorites"]
+        if changed:
+            self.data["sources"] = sources
+            self.data["favorites"] = list(payload["favorites"])
+            self.clear_scan_cache()
+        return changed
+
+    def _initialize_shared_browser_collections(self) -> None:
+        with shared_state_file_lock(self.shared_browser_state_file):
+            shared = normalized_shared_collections(json_read(self.shared_browser_state_file, None))
+            if shared is None:
+                self._write_shared_browser_collections()
+                return
+            if self._apply_shared_browser_collections(shared):
+                json_write(self.state_file, self.data)
+
+    def _sync_shared_browser_collections(self) -> None:
+        with self.lock, shared_state_file_lock(self.shared_browser_state_file):
+            shared = normalized_shared_collections(json_read(self.shared_browser_state_file, None))
+            if shared is None:
+                self._write_shared_browser_collections()
+                return
+            if self._apply_shared_browser_collections(shared):
+                json_write(self.state_file, self.data)
 
     def settings(self) -> dict[str, Any]:
         with self.lock:
-            return dict(self.data.setdefault("settings", {"card_size": 260, "ui_scale": 1.0, "theme": "original"}))
+            self._sync_shared_browser_collections()
+            return dict(self.data.setdefault("settings", {"ui_scale": 1.0, "card_size": 260, "theme": "original"}))
 
     def update_settings(self, values: dict[str, Any]) -> dict[str, Any]:
+        self._sync_shared_browser_collections()
         supported = {"ui_scale", "card_size", "theme"}
         if not supported.intersection(values):
             raise ValueError("No supported setting was provided.")
@@ -221,8 +397,8 @@ class VaultState:
             updates["card_size"] = min(380, max(190, round(card_size)))
         if "theme" in values:
             theme = str(values["theme"]).strip().lower()
-            if theme not in {"original", "gloss"}:
-                raise ValueError("Theme must be original or gloss.")
+            if theme not in {"original", "gloss", "nier"}:
+                raise ValueError("Theme must be original, gloss, or nier.")
             updates["theme"] = theme
         with self.lock:
             settings = self.data.setdefault("settings", {})
@@ -230,7 +406,7 @@ class VaultState:
             settings.setdefault("ui_scale", 1.0)
             settings.setdefault("card_size", 260)
             settings.setdefault("theme", "original")
-            self.save()
+            self.save(shared_fields=())
             return dict(settings)
 
     def clear_scan_cache(self) -> None:
@@ -239,6 +415,7 @@ class VaultState:
 
     def sources(self) -> list[dict[str, Any]]:
         with self.lock:
+            self._sync_shared_browser_collections()
             sources = []
             for source in self.data.get("sources", []):
                 row = dict(source)
@@ -248,12 +425,14 @@ class VaultState:
             return sources
 
     def source(self, source_id: str) -> dict[str, Any] | None:
+        self._sync_shared_browser_collections()
         for source in self.data.get("sources", []):
             if source.get("id") == source_id:
                 return source
         return None
 
     def resolve_file(self, source_id: str, relative_path: str) -> Path | None:
+        self._sync_shared_browser_collections()
         source = self.source(source_id)
         if not source or not isinstance(relative_path, str) or not relative_path.strip():
             return None
@@ -267,11 +446,13 @@ class VaultState:
         return f"{source_id}:{relative_path}"
 
     def is_favorite(self, source_id: str, relative_path: str) -> bool:
+        self._sync_shared_browser_collections()
         return self.favorite_key(source_id, relative_path) in self.data.get("favorites", [])
 
     def toggle_favorite(self, source_id: str, relative_path: str) -> bool:
         key = self.favorite_key(source_id, relative_path)
-        with self.lock:
+        with self.lock, shared_state_file_lock(self.shared_browser_state_file):
+            self._sync_shared_browser_collections()
             favorites = self.data.setdefault("favorites", [])
             if key in favorites:
                 favorites.remove(key)
@@ -279,33 +460,35 @@ class VaultState:
             else:
                 favorites.append(key)
                 value = True
-            self.save()
+            self.save(shared_fields=("favorites",))
             return value
 
     def add_source(self, path_text: str, name: str | None = None, recursive: bool = True) -> dict[str, Any]:
-        path = Path(path_text).expanduser().resolve()
-        if not path.exists() or not path.is_dir():
-            raise ValueError("That folder does not exist.")
-        for source in self.data.get("sources", []):
-            try:
-                if Path(source["path"]).expanduser().resolve() == path:
-                    return source
-            except Exception:
-                continue
-        source = {
-            "id": f"source_{uuid.uuid4().hex[:10]}",
-            "name": (name or path.name or "Media Folder").strip(),
-            "path": str(path),
-            "recursive": bool(recursive),
-        }
-        with self.lock:
+        with self.lock, shared_state_file_lock(self.shared_browser_state_file):
+            self._sync_shared_browser_collections()
+            path = Path(path_text).expanduser().resolve()
+            if not path.exists() or not path.is_dir():
+                raise ValueError("That folder does not exist.")
+            for existing_source in self.data.get("sources", []):
+                try:
+                    if Path(existing_source["path"]).expanduser().resolve() == path:
+                        return existing_source
+                except Exception:
+                    continue
+            source = {
+                "id": f"source_{uuid.uuid4().hex[:10]}",
+                "name": (name or path.name or "Media Folder").strip(),
+                "path": str(path),
+                "recursive": bool(recursive),
+            }
             self.data.setdefault("sources", []).append(source)
             self.clear_scan_cache()
-            self.save()
-        return source
+            self.save(shared_fields=("folders",))
+            return source
 
     def update_source(self, source_id: str, values: dict[str, Any]) -> dict[str, Any]:
-        with self.lock:
+        with self.lock, shared_state_file_lock(self.shared_browser_state_file):
+            self._sync_shared_browser_collections()
             source = self.source(source_id)
             if not source:
                 raise KeyError("Source not found")
@@ -314,11 +497,12 @@ class VaultState:
             if "recursive" in values:
                 source["recursive"] = bool(values["recursive"])
             self.clear_scan_cache()
-            self.save()
+            self.save(shared_fields=("folders",))
             return source
 
     def remove_source(self, source_id: str) -> None:
-        with self.lock:
+        with self.lock, shared_state_file_lock(self.shared_browser_state_file):
+            self._sync_shared_browser_collections()
             sources = self.data.get("sources", [])
             if len(sources) <= 1:
                 raise ValueError("LumaVault needs at least one source folder.")
@@ -331,6 +515,7 @@ class VaultState:
             self.save()
 
     def scan(self, source_filter: str = "all") -> list[dict[str, Any]]:
+        self._sync_shared_browser_collections()
         favorites = set(self.data.get("favorites", []))
         cached = self._scan_cache.get(source_filter)
         if cached and time.monotonic() - cached[0] < 30:

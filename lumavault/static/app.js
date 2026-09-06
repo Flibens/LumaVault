@@ -107,10 +107,12 @@
   }
 
   function applyTheme(theme, persist = true) {
-    const next = theme === "gloss" ? "gloss" : "original";
+    const supported = new Set(["original", "gloss", "nier"]);
+    const next = supported.has(theme) ? theme : "original";
     state.theme = next;
     document.documentElement.dataset.theme = next;
     document.body.classList.toggle("theme-gloss", next === "gloss");
+    document.body.classList.toggle("theme-nier", next === "nier");
     $$('[data-theme-choice]').forEach(button => {
       const active = button.dataset.themeChoice === next;
       button.classList.toggle("active", active);

@@ -80,6 +80,24 @@ class UiScaleContractTests(unittest.TestCase):
         self.assertIn("body.theme-gloss .app-shell", CSS)
         self.assertIn("backdrop-filter: blur(", CSS)
 
+    def test_nier_theme_is_selectable_and_styles_every_media_surface(self):
+        self.assertIn('data-theme-choice="nier"', HTML)
+        self.assertIn("Nier Automata", HTML)
+        self.assertIn("theme-preview-nier", HTML)
+        self.assertIn('const supported = new Set(["original", "gloss", "nier"])', JS)
+        self.assertIn('body.classList.toggle("theme-nier", next === "nier")', JS)
+        self.assertIn("body.theme-nier {", CSS)
+        self.assertIn("color-scheme: light", CSS)
+        for surface in (
+            ".app-shell", ".sidebar", ".topbar", ".filterbar", ".media-card",
+            ".viewer", ".inspector", ".compare-overlay", ".modal-card",
+            ".workflow-canvas", ".workflow-node",
+        ):
+            self.assertIn(f"body.theme-nier {surface}", CSS)
+        self.assertIn("body.theme-nier .media-card.multi-selected", CSS)
+        self.assertIn("body.theme-nier .media-card.selected-a", CSS)
+        self.assertIn("body.theme-nier .media-card.selected-b", CSS)
+
 
 if __name__ == "__main__":
     unittest.main()

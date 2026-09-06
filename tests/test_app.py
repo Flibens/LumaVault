@@ -2,6 +2,7 @@ import json
 import math
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -11,7 +12,7 @@ from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
 import lumavault.metadata as metadata_module
-from lumavault.app import VaultState, create_app, file_generation_metadata
+from lumavault.app import METADATA_INDEX_VERSION, VaultState, create_app, file_generation_metadata
 from lumavault.metadata import (
     _resolve_api_value,
     _scan_bytes_for_workflow,
@@ -34,9 +35,9 @@ class LumaVaultAppTests(unittest.TestCase):
             "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "aurora.safetensors"}},
             "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "a glass city at blue hour"}, "_meta": {"title": "Positive Prompt"}},
             "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "low quality"}, "_meta": {"title": "Negative Prompt"}},
-            "4": {"class_type": "KSampler", "inputs": {"seed": 4242, "steps": 28, "cfg": 6.5, "sampler_name": "euler", "scheduler": "normal", "positive": ["2", 0], "negative": ["3", 0], "model": ["1", 0]}},
+            "4": {"class_type": "KSampler", "inputs": {"seed": 4242, "steps": 28, "cfg": 6.5, "sampler_name": "euler", "scheduler": "normal", "positive": ["2", 0], "negative": ["3", 0], "model": ["6", 0]}},
             "5": {"class_type": "EmptyLatentImage", "inputs": {"width": 768, "height": 1024}},
-            "6": {"class_type": "LoraLoader", "inputs": {"lora_name": "cinematic.safetensors", "strength_model": 0.8, "strength_clip": 0.7}},
+            "6": {"class_type": "LoraLoader", "inputs": {"model": ["1", 0], "lora_name": "cinematic.safetensors", "strength_model": 0.8, "strength_clip": 0.7}},
         }
         workflow = {
             "nodes": [
@@ -155,6 +156,9 @@ class LumaVaultAppTests(unittest.TestCase):
             second = reloaded_client.get("/api/media?source=test&search_field=model&search=aurora")
         self.assertEqual(second.status_code, 200)
         self.assertEqual(second.get_json()["total"], 1)
+
+    def test_metadata_index_version_invalidates_pre_lora_activity_cache(self):
+        self.assertGreaterEqual(METADATA_INDEX_VERSION, 3)
 
     def test_cached_metadata_search_does_not_touch_every_media_file_again(self):
         rows = self.state.scan("test")
@@ -843,6 +847,100 @@ class LumaVaultAppTests(unittest.TestCase):
         }
         self.assertLessEqual(len(parse_comfy_metadata({"prompt": wide})["prompt"]), 20_000)
 
+    def test_shared_browser_state_initializes_from_vault_and_syncs_external_changes(self):
+        shared_file = self.data / "shared-comfyui-image-browser.json"
+        self.state.data["sources"] = [
+            {"id": "default", "name": "ComfyUI Output", "path": str(self.media), "recursive": False},
+            {"id": "album", "name": "Album", "path": str(self.media), "recursive": True},
+        ]
+        self.state.data["favorites"] = ["album:sample.png"]
+        self.state.save()
+
+        self.assertTrue(shared_file.is_file())
+        shared = json.loads(shared_file.read_text(encoding="utf-8"))
+        self.assertEqual(shared["favorites"], ["album:sample.png"])
+        self.assertEqual(shared["folders"], [{"id": "album", "name": "Album", "path": str(self.media)}])
+
+        shared["favorites"] = ["default:sample.png"]
+        shared["folders"] = [{"id": "remote", "name": "Remote", "path": str(self.media)}]
+        shared_file.write_text(json.dumps(shared), encoding="utf-8")
+
+        self.assertEqual(self.state.sources()[1]["id"], "remote")
+        self.assertTrue(self.state.is_favorite("default", "sample.png"))
+
+    def test_malformed_shared_collections_are_ignored_without_crashing(self):
+        shared_file = self.data / "shared-comfyui-image-browser.json"
+        shared_file.write_text(
+            json.dumps({"version": 1, "folders": None, "favorites": None}),
+            encoding="utf-8",
+        )
+
+        reloaded = VaultState(self.data, migrate_legacy=False)
+
+        self.assertEqual([source["id"] for source in reloaded.data["sources"]], ["test"])
+        self.assertEqual(reloaded.data["favorites"], [])
+
+    def test_shared_sync_preserves_recursive_setting_and_removed_default_source(self):
+        album = self.media / "album"
+        album.mkdir()
+        custom = self.state.add_source(str(album), "Recursive Album", recursive=True)
+        self.assertTrue(custom["recursive"])
+        self.state.remove_source("test")
+
+        synced_sources = self.state.sources()
+
+        self.assertEqual([source["id"] for source in synced_sources], [custom["id"]])
+        self.assertTrue(synced_sources[0]["recursive"])
+
+    def test_concurrent_shared_updates_preserve_folders_and_favorites(self):
+        root = self.data.parent
+        shared_file = root / "shared.json"
+        shared_file.write_text(
+            json.dumps({"version": 1, "folders": [], "favorites": []}),
+            encoding="utf-8",
+        )
+        album = root / "album"
+        album.mkdir()
+        first = VaultState(root / "first", migrate_legacy=False)
+        second = VaultState(root / "second", migrate_legacy=False)
+        for state in (first, second):
+            state.shared_browser_state_file = shared_file
+            state.data["sources"] = [{
+                "id": "default", "name": "ComfyUI Output",
+                "path": str(self.media), "recursive": False,
+            }]
+            state.data["favorites"] = []
+
+        from lumavault import app as app_module
+        real_json_read = app_module.json_read
+        barrier = threading.Barrier(2)
+
+        def delayed_read(path, fallback):
+            value = real_json_read(path, fallback)
+            if Path(path) == shared_file:
+                time.sleep(0.05)
+            return value
+
+        def update_favorite():
+            barrier.wait()
+            first.toggle_favorite("default", "sample.png")
+
+        def update_folder():
+            barrier.wait()
+            second.add_source(str(album), "Album", recursive=True)
+
+        with mock.patch("lumavault.app.json_read", side_effect=delayed_read):
+            threads = [threading.Thread(target=update_favorite), threading.Thread(target=update_folder)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+
+        shared = json.loads(shared_file.read_text(encoding="utf-8"))
+        self.assertEqual(shared["favorites"], ["default:sample.png"])
+        self.assertEqual(shared["folders"], [{"id": second.data["sources"][1]["id"], "name": "Album", "path": str(album)}])
+
     def test_favorite_and_thumbnail(self):
         favorite = self.client.post("/api/favorite", json={"source_id": "test", "path": "sample.png"})
         self.assertTrue(favorite.get_json()["is_favorite"])
@@ -890,6 +988,13 @@ class LumaVaultAppTests(unittest.TestCase):
         self.assertEqual(response.get_json()["settings"]["theme"], "gloss")
         reloaded = VaultState(self.data, migrate_legacy=False)
         self.assertEqual(reloaded.data["settings"]["theme"], "gloss")
+
+    def test_nier_theme_setting_is_saved_to_application_state(self):
+        response = self.client.patch("/api/settings", json={"theme": "nier"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["settings"]["theme"], "nier")
+        reloaded = VaultState(self.data, migrate_legacy=False)
+        self.assertEqual(reloaded.data["settings"]["theme"], "nier")
 
     def test_theme_setting_rejects_unknown_theme(self):
         response = self.client.patch("/api/settings", json={"theme": "neon"})
@@ -939,6 +1044,194 @@ class LumaVaultAppTests(unittest.TestCase):
             "strength_model": 0.8,
             "strength_clip": 0.6,
         }])
+
+    def test_comfyui_parameters_reports_only_lora_corroborated_by_hashes_payload(self):
+        metadata = {
+            "parameters": (
+                "portrait, <lora:active_style:0.75> <lora:disabled_style:1>\n"
+                "Steps: 30, Sampler: Euler, CFG scale: 5, Seed: 7, Size: 1024x1536, "
+                "Hashes: {\"LORA:active_style\":\"abc123\",\"model\":\"deadbeef\"}, Version: ComfyUI"
+            ),
+        }
+
+        self.assertEqual(parse_comfy_metadata(metadata)["loras"], [{
+            "name": "active_style", "strength_model": 0.75, "strength_clip": 0.75,
+        }])
+
+    def test_api_lora_manager_stack_reports_only_active_entries_on_executed_model_path(self):
+        metadata = {"prompt": {
+            "base": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "base.safetensors"}},
+            "stack": {"class_type": "Lora Stacker (LoraManager)", "inputs": {
+                "loras": {"__value__": [
+                    {"name": "active_style", "strength": 0.8, "clipStrength": 0.6, "active": True},
+                    {"name": "disabled_style", "strength": 1.0, "clipStrength": 1.0, "active": False},
+                ]},
+            }},
+            "loader": {"class_type": "Lora Loader (LoraManager)", "inputs": {
+                "model": ["base", 0], "lora_stack": ["stack", 0],
+            }},
+            "sampler": {"class_type": "KSampler", "inputs": {"model": ["loader", 0]}},
+            "unused": {"class_type": "Lora Stacker (LoraManager)", "inputs": {
+                "loras": {"__value__": [{"name": "unselected_style", "strength": 1.0, "active": True}]},
+            }},
+        }}
+
+        self.assertEqual(parse_comfy_metadata(metadata)["loras"], [{
+            "name": "active_style", "strength_model": 0.8, "strength_clip": 0.6,
+        }])
+
+    def test_parameters_and_workflow_do_not_duplicate_same_lora_with_file_extension(self):
+        metadata = {
+            "parameters": (
+                "portrait, <lora:active_style:0.75>\nSteps: 20, Hashes: "
+                "{\"LORA:active_style\":\"abc123\"}, Version: ComfyUI"
+            ),
+            "workflow": {"nodes": [{
+                "id": 8, "type": "LoraLoader", "mode": 0,
+                "widgets_values": ["active_style.safetensors", 0.75, 0.75],
+            }]},
+        }
+
+        self.assertEqual(parse_comfy_metadata(metadata)["loras"], [{
+            "name": "active_style", "strength_model": 0.75, "strength_clip": 0.75,
+        }])
+
+    def test_comfyui_parameters_do_not_treat_prompt_only_lora_tag_as_executed(self):
+        metadata = {
+            "parameters": (
+                "portrait, <lora:disabled_style:1>\n"
+                "Steps: 30, Sampler: Euler, CFG scale: 5, Seed: 7, Size: 1024x1536, "
+                "Model: example, Hashes: {\"model\":\"deadbeef\"}, Version: ComfyUI"
+            ),
+        }
+        self.assertEqual(parse_comfy_metadata(metadata)["loras"], [])
+
+    def test_api_sampler_custom_direct_model_ignores_disconnected_lora(self):
+        graph = {
+            "base": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "base.safetensors"}},
+            "active": {"class_type": "LoraLoader", "inputs": {
+                "model": ["base", 0], "lora_name": "active.safetensors", "strength_model": 1.0,
+            }},
+            "unused": {"class_type": "LoraLoader", "inputs": {
+                "model": ["base", 0], "lora_name": "unused.safetensors", "strength_model": 1.0,
+            }},
+            "sampler": {"class_type": "SamplerCustom", "inputs": {"model": ["active", 0]}},
+        }
+
+        self.assertEqual(parse_comfy_metadata({"prompt": graph})["loras"], [{
+            "name": "active.safetensors", "strength_model": 1.0, "strength_clip": 1.0,
+        }])
+
+    def test_active_loras_with_same_basename_in_different_folders_remain_distinct(self):
+        graph = {
+            "base": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "base.safetensors"}},
+            "first": {"class_type": "LoraLoader", "inputs": {
+                "model": ["base", 0], "lora_name": "styles/shared.safetensors", "strength_model": 0.5,
+            }},
+            "second": {"class_type": "LoraLoader", "inputs": {
+                "model": ["first", 0], "lora_name": "characters/shared.safetensors", "strength_model": 0.8,
+            }},
+            "sampler": {"class_type": "KSampler", "inputs": {"model": ["second", 0]}},
+        }
+
+        self.assertEqual(parse_comfy_metadata({"prompt": graph})["loras"], [
+            {"name": "styles/shared.safetensors", "strength_model": 0.5, "strength_clip": 0.5},
+            {"name": "characters/shared.safetensors", "strength_model": 0.8, "strength_clip": 0.8},
+        ])
+
+    def test_api_model_switch_reports_only_lora_on_selected_branch(self):
+        graph = {
+            "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "base.safetensors"}},
+            "2": {"class_type": "LoraLoaderModelOnly", "inputs": {
+                "model": ["1", 0], "lora_name": "optional.safetensors", "strength_model": 1.0,
+            }},
+            "3": {"class_type": "ComfySwitchNode", "inputs": {
+                "switch": False, "on_false": ["1", 0], "on_true": ["2", 0],
+            }},
+            "4": {"class_type": "KSampler", "inputs": {"model": ["3", 0]}},
+        }
+        metadata = {
+            "workflow": {"nodes": [{
+                "id": 2, "type": "LoraLoaderModelOnly", "mode": 0,
+                "widgets_values": ["optional.safetensors", 1.0],
+            }]},
+            "prompt": graph,
+        }
+        self.assertEqual(parse_comfy_metadata(metadata)["loras"], [])
+        graph["3"]["inputs"]["switch"] = True
+        self.assertEqual(parse_comfy_metadata(metadata)["loras"], [{
+            "name": "optional.safetensors", "strength_model": 1.0, "strength_clip": 1.0,
+        }])
+
+    def test_parameter_hash_paths_disambiguate_same_basename(self):
+        metadata = {
+            "parameters": (
+                "portrait, <lora:styles/shared:0.7> <lora:characters/shared:0.9>\n"
+                "Steps: 20, Hashes: {\"LORA:styles/shared\":\"abc123\"}, Version: ComfyUI"
+            ),
+        }
+        self.assertEqual(parse_comfy_metadata(metadata)["loras"], [{
+            "name": "styles/shared", "strength_model": 0.7, "strength_clip": 0.7,
+        }])
+
+    def test_mixed_parameters_and_workflow_preserve_distinct_same_basename_loras(self):
+        metadata = {
+            "parameters": (
+                "portrait, <lora:shared:0.5>\nSteps: 20, "
+                "Hashes: {\"LORA:shared\":\"abc123\"}, Version: ComfyUI"
+            ),
+            "workflow": {"nodes": [
+                {"id": 1, "type": "LoraLoader", "mode": 0,
+                 "widgets_values": ["styles/shared.safetensors", 0.5, 0.5]},
+                {"id": 2, "type": "LoraLoader", "mode": 0,
+                 "widgets_values": ["characters/shared.safetensors", 0.8, 0.8]},
+            ]},
+        }
+        self.assertEqual(parse_comfy_metadata(metadata)["loras"], [
+            {"name": "styles/shared.safetensors", "strength_model": 0.5, "strength_clip": 0.5},
+            {"name": "characters/shared.safetensors", "strength_model": 0.8, "strength_clip": 0.8},
+        ])
+
+    def test_sampler_custom_ignores_disconnected_guider_lora(self):
+        graph = {
+            "base": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "base.safetensors"}},
+            "active": {"class_type": "LoraLoader", "inputs": {
+                "model": ["base", 0], "lora_name": "active.safetensors", "strength_model": 1.0,
+            }},
+            "unused": {"class_type": "LoraLoader", "inputs": {
+                "model": ["base", 0], "lora_name": "unused.safetensors", "strength_model": 1.0,
+            }},
+            "active_guider": {"class_type": "CFGGuider", "inputs": {"model": ["active", 0]}},
+            "unused_guider": {"class_type": "CFGGuider", "inputs": {"model": ["unused", 0]}},
+            "sampler": {"class_type": "SamplerCustomAdvanced", "inputs": {"guider": ["active_guider", 0]}},
+        }
+        self.assertEqual(parse_comfy_metadata({"prompt": graph})["loras"], [{
+            "name": "active.safetensors", "strength_model": 1.0, "strength_clip": 1.0,
+        }])
+
+    def test_numbered_model_switch_follows_selected_branch(self):
+        graph = {
+            "base": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "base.safetensors"}},
+            "optional": {"class_type": "LoraLoader", "inputs": {
+                "model": ["base", 0], "lora_name": "optional.safetensors", "strength_model": 1.0,
+            }},
+            "switch": {"class_type": "ModelSwitch", "inputs": {
+                "select": 1, "model1": ["optional", 0], "model2": ["base", 0],
+            }},
+            "sampler": {"class_type": "KSampler", "inputs": {"model": ["switch", 0]}},
+        }
+        self.assertEqual(parse_comfy_metadata({"prompt": graph})["loras"], [{
+            "name": "optional.safetensors", "strength_model": 1.0, "strength_clip": 1.0,
+        }])
+        graph["switch"]["inputs"]["select"] = 2
+        self.assertEqual(parse_comfy_metadata({"prompt": graph})["loras"], [])
+
+    def test_bypassed_ui_lora_is_not_reported_without_api_graph(self):
+        metadata = {"workflow": {"nodes": [{
+            "id": 35, "type": "LoraLoaderModelOnly", "mode": 4,
+            "widgets_values": ["bypassed.safetensors", 1.0],
+        }]}}
+        self.assertEqual(parse_comfy_metadata(metadata)["loras"], [])
 
     def test_split_sampler_nodes_and_generation_model_priority(self):
         graph = {
