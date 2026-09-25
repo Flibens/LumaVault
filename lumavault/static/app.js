@@ -23,7 +23,12 @@
     external: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 4h6v6M20 4l-9 9"/><path d="M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6"/></svg>',
     trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5M14 11v5"/></svg>',
     copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>',
-    play: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4V8Z"/></svg>'
+    play: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m8 5 11 7-11 7V5Z"/></svg>',
+    pause: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M8 5v14M16 5v14"/></svg>',
+    volume: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 10v4h4l5 4V6L8 10H4Z"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/></svg>',
+    muted: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 10v4h4l5 4V6L8 10H4Z"/><path d="m17 9 5 5M22 9l-5 5"/></svg>',
+    fullscreen: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>',
+    "fullscreen-exit": '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8h5V3M21 8h-5V3M3 16h5v5M21 16h-5v5"/></svg>'
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -44,6 +49,7 @@
     search: "", searchField: "filename", sort: "date_desc", kind: "all", favorites: false,
     items: [], total: 0, compareMode: false, compareItems: [], selectedKeys: new Set(),
     compareZoom: 1, comparePanX: 0, comparePanY: 0, comparePanning: false, comparePanStart: null,
+    compareViewMode: "wipe", comparePosition: 50, compareAmount: 50,
     viewerIndex: -1, metadata: null, dataDir: "", zoom: 1, panX: 0, panY: 0,
     panning: false, panStart: null, requestToken: 0, uiScale: 1, cardSize: 260, theme: "original", workflowView: null
   };
@@ -259,7 +265,7 @@
       await loadSources();
       state.source = state.sources.find(source => source.path.toLowerCase() === path.toLowerCase())?.id || "all";
       renderSources();
-      $("#sourcesModal").classList.add("hidden");
+      setSourcesModalOpen(false);
       loadMedia(true);
       toast(`Added ${name}`);
     } catch (error) { toast(error.message, "error"); }
@@ -472,6 +478,16 @@
     syncCompareDock();
   }
 
+  function setCompareOverlayOpen(open) {
+    $("#compareOverlay").classList.toggle("hidden", !open);
+    document.body.classList.toggle("compare-open", open);
+  }
+
+  function setSourcesModalOpen(open) {
+    $("#sourcesModal").classList.toggle("hidden", !open);
+    document.body.classList.toggle("modal-open", open);
+  }
+
   function openCompare() {
     if (state.compareItems.length !== 2) return;
     const [a, b] = state.compareItems;
@@ -480,9 +496,11 @@
     $("#compareLabelA").textContent = `A · ${a.name}`;
     $("#compareLabelB").textContent = `B · ${b.name}`;
     $("#compareTitle").textContent = `${a.name}  /  ${b.name}`;
-    $("#compareOverlay").classList.remove("hidden");
+    setCompareOverlayOpen(true);
     resetCompareView();
     updateCompareSlider(50);
+    setCompareViewMode(state.compareViewMode);
+    setCompareAmount(state.compareAmount);
     requestAnimationFrame(syncCompareGeometry);
   }
 
@@ -570,8 +588,43 @@
 
   function updateCompareSlider(percent) {
     const value = Math.max(0, Math.min(100, percent));
-    $("#compareFrontWrap").style.width = `${value}%`;
+    state.comparePosition = value;
+    $("#compareFrontWrap").style.width = state.compareViewMode === "wipe" ? `${value}%` : "100%";
     $("#compareDivider").style.left = `${value}%`;
+  }
+
+  function setCompareViewMode(mode) {
+    const supported = new Set(["wipe", "difference", "overlay"]);
+    const next = supported.has(mode) ? mode : "wipe";
+    state.compareViewMode = next;
+    const stage = $("#compareStage");
+    const front = $("#compareFront");
+    stage.dataset.compareMode = next;
+    $$("[data-compare-view]").forEach(button => {
+      const active = button.dataset.compareView === next;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-pressed", String(active));
+    });
+    $("#compareOverlayControl").classList.toggle("hidden", next !== "overlay");
+    $("#compareFrontWrap").style.width = next === "wipe" ? `${state.comparePosition}%` : "100%";
+    if (next === "overlay") front.style.opacity = String(state.compareAmount / 100);
+    else front.style.opacity = "1";
+    const hints = {
+      wipe: "Scroll to zoom · drag image to pan · drag divider to compare",
+      difference: "Difference map · black pixels match · color marks change",
+      overlay: "Overlay A over B · adjust the A percentage above"
+    };
+    $(".compare-bottom-hint", stage).textContent = hints[next];
+  }
+
+  function setCompareAmount(value) {
+    const numeric = Number(value);
+    state.compareAmount = Number.isFinite(numeric) ? Math.max(0, Math.min(100, Math.round(numeric))) : 50;
+    $("#compareOverlayAmount").value = String(state.compareAmount);
+    $("#compareOverlayValue").textContent = `${state.compareAmount}%`;
+    const front = $("#compareFront");
+    if (state.compareViewMode === "overlay") front.style.opacity = String(state.compareAmount / 100);
+    else front.style.opacity = "1";
   }
 
   function currentViewerItem() { return state.items[state.viewerIndex]; }
@@ -614,7 +667,21 @@
 
   function renderViewerMedia(item) {
     const canvas = $("#mediaCanvas");
-    if (item.kind === "video") canvas.innerHTML = `<video src="${escapeHtml(mediaUrl(item))}" controls autoplay loop></video>`;
+    if (item.kind === "video") {
+      canvas.innerHTML = `
+        <div class="themed-video-player" id="themedVideoPlayer" tabindex="0">
+          <div class="video-viewport"><video id="viewerVideo" src="${escapeHtml(mediaUrl(item))}" autoplay loop playsinline></video></div>
+          <div class="video-controls" role="group" aria-label="Video controls">
+            <button type="button" data-video-action="play" aria-label="Pause video">${icon("pause")}</button>
+            <output class="video-time" aria-live="off"><span data-video-current>0:00</span><i>/</i><span data-video-duration>0:00</span></output>
+            <input class="video-progress" type="range" min="0" max="0" step="0.01" value="0" aria-label="Video position">
+            <button type="button" data-video-action="mute" aria-label="Mute video">${icon("volume")}</button>
+            <input class="video-volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Video volume">
+            <button type="button" data-video-action="fullscreen" aria-label="Enter fullscreen">${icon("fullscreen")}</button>
+          </div>
+        </div>`;
+      bindVideoPlayer();
+    }
     else if (item.kind === "audio") canvas.innerHTML = `<div class="audio-player"><div class="audio-art">${audioBars()}</div><audio src="${escapeHtml(mediaUrl(item))}" controls autoplay></audio></div>`;
     else {
       canvas.innerHTML = `<img id="viewerImage" class="zoomable" src="${escapeHtml(mediaUrl(item))}" alt="${escapeHtml(item.name)}">`;
@@ -623,6 +690,78 @@
     $("#zoomOutBtn").style.visibility = item.kind === "image" ? "visible" : "hidden";
     $("#zoomInBtn").style.visibility = item.kind === "image" ? "visible" : "hidden";
     $("#zoomResetBtn").style.visibility = item.kind === "image" ? "visible" : "hidden";
+  }
+
+  function formatMediaTime(seconds) {
+    const safe = Number.isFinite(seconds) && seconds >= 0 ? seconds : 0;
+    const minutes = Math.floor(safe / 60);
+    const remainder = Math.floor(safe % 60);
+    return `${minutes}:${String(remainder).padStart(2, "0")}`;
+  }
+
+  function bindVideoPlayer() {
+    const player = $("#themedVideoPlayer");
+    const video = $("#viewerVideo");
+    if (!player || !video) return;
+    const playButton = $('[data-video-action="play"]', player);
+    const muteButton = $('[data-video-action="mute"]', player);
+    const fullscreenButton = $('[data-video-action="fullscreen"]', player);
+    const progress = $(".video-progress", player);
+    const volume = $(".video-volume", player);
+    const current = $("[data-video-current]", player);
+    const duration = $("[data-video-duration]", player);
+
+    const paintRange = (input, ratio) => input.style.setProperty("--range-progress", `${Math.max(0, Math.min(1, ratio)) * 100}%`);
+    const syncTransport = () => {
+      const total = Number.isFinite(video.duration) ? video.duration : 0;
+      progress.max = String(total);
+      progress.value = String(Math.min(video.currentTime || 0, total || 0));
+      current.textContent = formatMediaTime(video.currentTime);
+      duration.textContent = formatMediaTime(total);
+      paintRange(progress, total ? video.currentTime / total : 0);
+      const paused = video.paused;
+      playButton.innerHTML = icon(paused ? "play" : "pause");
+      playButton.setAttribute("aria-label", paused ? "Play video" : "Pause video");
+    };
+    const syncVolume = () => {
+      const effective = video.muted ? 0 : video.volume;
+      volume.value = String(effective);
+      paintRange(volume, effective);
+      muteButton.innerHTML = icon(effective === 0 ? "muted" : "volume");
+      muteButton.setAttribute("aria-label", effective === 0 ? "Unmute video" : "Mute video");
+    };
+    const syncFullscreen = () => {
+      const fullscreen = document.fullscreenElement === player;
+      fullscreenButton.innerHTML = icon(fullscreen ? "fullscreen-exit" : "fullscreen");
+      fullscreenButton.setAttribute("aria-label", fullscreen ? "Exit fullscreen" : "Enter fullscreen");
+    };
+    const togglePlayback = () => video.paused ? video.play().catch(() => syncTransport()) : video.pause();
+
+    playButton.addEventListener("click", togglePlayback);
+    video.addEventListener("click", togglePlayback);
+    progress.addEventListener("input", () => { if (Number.isFinite(video.duration)) video.currentTime = Number(progress.value); syncTransport(); });
+    muteButton.addEventListener("click", () => { video.muted = !video.muted; syncVolume(); });
+    volume.addEventListener("input", () => { video.muted = false; video.volume = Number(volume.value); syncVolume(); });
+    fullscreenButton.addEventListener("click", async () => {
+      try {
+        if (document.fullscreenElement === player) await document.exitFullscreen();
+        else if (player.requestFullscreen) await player.requestFullscreen();
+        else if (video.webkitDisplayingFullscreen && video.webkitExitFullscreen) video.webkitExitFullscreen();
+        else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
+      } catch (_) { syncFullscreen(); }
+    });
+    player.addEventListener("keydown", event => {
+      const key = event.key.toLowerCase();
+      if (event.key === " " || key === "k") { event.preventDefault(); event.stopPropagation(); togglePlayback(); }
+      if (key === "m") { event.stopPropagation(); video.muted = !video.muted; syncVolume(); }
+      if (key === "f") { event.stopPropagation(); fullscreenButton.click(); }
+    });
+    ["loadedmetadata", "durationchange", "timeupdate", "play", "pause", "ended"].forEach(name => video.addEventListener(name, syncTransport));
+    video.addEventListener("volumechange", syncVolume);
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    syncTransport();
+    syncVolume();
+    syncFullscreen();
   }
 
   function settingCell(label, value, wide = false, copyValue = null, copySuccess = "Copied") {
@@ -1082,9 +1221,7 @@
   }
 
   function isPointOnRenderedMedia(event) {
-    if (event.target.closest(".viewer-top, .viewer-nav, .audio-player")) return true;
-    const video = event.target.closest("#mediaCanvas video");
-    if (video) return true;
+    if (event.target.closest(".viewer-top, .viewer-nav, .audio-player, .themed-video-player")) return true;
     const image = $("#viewerImage");
     if (!image || event.target !== image || !image.naturalWidth || !image.naturalHeight) return false;
     const rect = image.getBoundingClientRect();
@@ -1278,10 +1415,12 @@
   $("#compareModeBtn").addEventListener("click", () => setCompareMode(!state.compareMode));
   $("#clearCompareBtn").addEventListener("click", clearCompare);
   $("#openCompareBtn").addEventListener("click", openCompare);
-  $("#closeCompareOverlay").addEventListener("click", () => $("#compareOverlay").classList.add("hidden"));
+  $("#closeCompareOverlay").addEventListener("click", () => setCompareOverlayOpen(false));
   $("#compareZoomOutBtn").addEventListener("click", () => setCompareZoom(state.compareZoom - .25));
   $("#compareZoomInBtn").addEventListener("click", () => setCompareZoom(state.compareZoom + .25));
   $("#compareZoomResetBtn").addEventListener("click", resetCompareView);
+  $$("[data-compare-view]").forEach(button => button.addEventListener("click", () => setCompareViewMode(button.dataset.compareView)));
+  $("#compareOverlayAmount").addEventListener("input", event => setCompareAmount(event.target.value));
   $("#compareStage").addEventListener("wheel", event => {
     event.preventDefault();
     setCompareZoom(state.compareZoom + (event.deltaY < 0 ? .2 : -.2), event.clientX, event.clientY);
@@ -1289,7 +1428,7 @@
   $("#compareStage").addEventListener("pointerdown", event => {
     if (event.button !== 0) return;
     const stage = event.currentTarget;
-    const dividerDrag = !!event.target.closest("#compareDivider");
+    const dividerDrag = state.compareViewMode === "wipe" && !!event.target.closest("#compareDivider");
     let move;
     if (state.compareZoom > 1 && !dividerDrag) {
       state.comparePanning = true;
@@ -1305,13 +1444,13 @@
         applyCompareTransform();
       };
       applyCompareTransform();
-    } else {
+    } else if (state.compareViewMode === "wipe") {
       move = ev => {
         const position = comparePointerPosition(ev.clientX, ev.clientY);
         updateCompareSlider(position.x / stage.clientWidth * 100);
       };
       move(event);
-    }
+    } else return;
     const end = ev => {
       if (ev.pointerId !== event.pointerId) return;
       state.comparePanning = false;
@@ -1334,9 +1473,9 @@
   $("#addSourceBtn").addEventListener("click", chooseFolder);
   $("#emptyAddBtn").addEventListener("click", chooseFolder);
   $("#modalAddSourceBtn").addEventListener("click", chooseFolder);
-  $("#manageSourcesBtn").addEventListener("click", () => $("#sourcesModal").classList.remove("hidden"));
-  $("#closeSourcesBtn").addEventListener("click", () => $("#sourcesModal").classList.add("hidden"));
-  $("#sourcesModal").addEventListener("click", event => { if (event.target.id === "sourcesModal") event.currentTarget.classList.add("hidden"); });
+  $("#manageSourcesBtn").addEventListener("click", () => setSourcesModalOpen(true));
+  $("#closeSourcesBtn").addEventListener("click", () => setSourcesModalOpen(false));
+  $("#sourcesModal").addEventListener("click", event => { if (event.target.id === "sourcesModal") setSourcesModalOpen(false); });
   $("#mobileMenuBtn").addEventListener("click", () => $("#sidebar").classList.toggle("open"));
   $("#uiScale").addEventListener("input", event => applyUiScale(Number(event.target.value) / 100));
   $$("[data-ui-scale]").forEach(button => button.addEventListener("click", () => applyUiScale(Number(button.dataset.uiScale))));
@@ -1374,8 +1513,8 @@
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") { event.preventDefault(); $("#searchInput").focus(); }
     if (event.key === "Escape") {
       $("#contextMenu").classList.add("hidden");
-      if (!$("#sourcesModal").classList.contains("hidden")) $("#sourcesModal").classList.add("hidden");
-      else if (!$("#compareOverlay").classList.contains("hidden")) $("#compareOverlay").classList.add("hidden");
+      if (!$("#sourcesModal").classList.contains("hidden")) setSourcesModalOpen(false);
+      else if (!$("#compareOverlay").classList.contains("hidden")) setCompareOverlayOpen(false);
       else if (!$("#viewer").classList.contains("hidden")) closeViewer();
       else if (state.selectedKeys.size) clearMultiSelection();
     }

@@ -61,6 +61,77 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn("ev.clientX - state.comparePanStart.x", JS)
         self.assertIn("* position.scaleX", JS)
 
+    def test_compare_offers_wipe_difference_and_percentage_overlay_modes(self):
+        self.assertIn('data-compare-view="wipe"', INDEX)
+        self.assertIn('data-compare-view="difference"', INDEX)
+        self.assertIn('data-compare-view="overlay"', INDEX)
+        self.assertIn('id="compareOverlayAmount"', INDEX)
+        self.assertIn('id="compareOverlayValue"', INDEX)
+        self.assertIn("compareViewMode: \"wipe\"", JS)
+        self.assertIn("function setCompareViewMode(mode)", JS)
+        self.assertIn("function setCompareAmount(value)", JS)
+        self.assertIn('stage.dataset.compareMode = next', JS)
+        self.assertIn('front.style.opacity = String(state.compareAmount / 100)', JS)
+        self.assertIn("mix-blend-mode: difference", CSS)
+        self.assertIn('.compare-stage[data-compare-mode="overlay"]', CSS)
+
+    def test_compare_dragging_only_moves_the_wipe_divider_in_wipe_mode(self):
+        pointer_section = JS[JS.index('$("#compareStage").addEventListener("pointerdown"'):JS.index('$("#compareFront").addEventListener("load"')]
+        self.assertIn('state.compareViewMode === "wipe"', pointer_section)
+        self.assertIn("updateCompareSlider", pointer_section)
+
+    def test_video_viewer_uses_themed_custom_controls_instead_of_native_controls(self):
+        render_section = JS[JS.index("function renderViewerMedia"):JS.index("function settingCell")]
+        self.assertIn('class="themed-video-player"', render_section)
+        self.assertIn('class="video-viewport"', render_section)
+        self.assertIn('id="viewerVideo"', render_section)
+        self.assertIn('class="video-progress"', render_section)
+        self.assertIn('class="video-volume"', render_section)
+        self.assertNotIn('<video id="viewerVideo" src="${escapeHtml(mediaUrl(item))}" controls', render_section)
+        self.assertIn("function bindVideoPlayer()", JS)
+        self.assertIn("function formatMediaTime(seconds)", JS)
+        self.assertIn("requestFullscreen", JS)
+        self.assertIn(".themed-video-player", CSS)
+        self.assertIn("body.theme-gloss .video-controls", CSS)
+        self.assertIn("body.theme-nier .video-controls", CSS)
+        self.assertIn("themed custom video controls", README)
+        self.assertNotIn("Video and audio playback with fully visible native controls", README)
+
+    def test_video_controls_use_a_reserved_row_below_every_aspect_ratio(self):
+        self.assertIn(".themed-video-player { position: absolute", CSS)
+        self.assertIn("grid-template-rows: minmax(0,1fr) auto", CSS)
+        self.assertIn(".video-viewport { position: relative; min-width: 0; min-height: 0; overflow: hidden", CSS)
+        video_controls = CSS[CSS.index(".video-controls {"):CSS.index(".video-controls button {")]
+        self.assertIn("position: relative", video_controls)
+        self.assertNotIn("position: absolute", video_controls)
+        self.assertIn(".themed-video-player:fullscreen", CSS)
+
+    def test_fullscreen_button_toggles_both_enter_and_exit(self):
+        bind_section = JS[JS.index("function bindVideoPlayer()"):JS.index("function settingCell")]
+        self.assertIn("document.fullscreenElement === player", bind_section)
+        self.assertIn("document.exitFullscreen()", bind_section)
+        self.assertIn('document.addEventListener("fullscreenchange"', bind_section)
+        self.assertIn('icon(fullscreen ? "fullscreen-exit" : "fullscreen")', bind_section)
+        self.assertIn('fullscreenButton.setAttribute("aria-label", fullscreen ? "Exit fullscreen" : "Enter fullscreen")', bind_section)
+
+    def test_acrylic_settings_and_compare_share_one_blurred_material(self):
+        self.assertIn("function setCompareOverlayOpen(open)", JS)
+        self.assertIn("function setSourcesModalOpen(open)", JS)
+        self.assertIn('document.body.classList.toggle("compare-open", open)', JS)
+        self.assertIn('document.body.classList.toggle("modal-open", open)', JS)
+        glass_css = CSS[CSS.index("/* Windows Acrylic"):CSS.index("/* Nier Automata")]
+        self.assertIn("body.theme-gloss.compare-open .app-shell", glass_css)
+        self.assertIn("body.theme-gloss.modal-open .app-shell", glass_css)
+        self.assertIn("body.theme-gloss .sources-manager-list", glass_css)
+        self.assertIn("body.theme-gloss .modal-card-foot", glass_css)
+        self.assertIn("body.theme-gloss .compare-mode-switch", glass_css)
+        self.assertIn("body.theme-gloss .compare-overlay-control", glass_css)
+        self.assertIn("body.theme-gloss .compare-label", glass_css)
+        self.assertIn("body.theme-gloss .compare-bottom-hint", glass_css)
+
+    def test_readme_lists_all_three_comparison_views(self):
+        self.assertIn("wipe, difference map, and percentage overlay", README)
+
     def test_switching_inspector_tabs_starts_at_top(self):
         self.assertIn("if (inspectorBody) inspectorBody.scrollTop = 0", JS)
 

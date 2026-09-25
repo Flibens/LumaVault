@@ -21,7 +21,7 @@ A polished, standalone Windows media browser for ComfyUI outputs and other creat
 - Multiple source folders with optional recursive scanning
 - Favorites and custom folders shared live with ComfyUI Image Browser
 - Image viewer with zoom, pan, keyboard navigation, and correctly contained portrait images
-- Video and audio playback with fully visible native controls
+- Video playback with themed custom video controls for play/pause, seeking, volume, mute, and fullscreen; native audio controls remain available
 - Detailed ComfyUI metadata: prompts, seed, model, sampler, scheduler, dimensions, and LoRAs
 - LoRA Manager/Stacker support that reports only the LoRAs active for an image
 - Visual ComfyUI-style workflow viewer with Original/Arrange layouts, collision-safe node dragging, expanded labeled subgraphs and internal links, input/output previews, pan, zoom, fit-to-screen, and selected-node JSON copying
@@ -29,7 +29,7 @@ A polished, standalone Windows media browser for ComfyUI outputs and other creat
 - Selectable metadata and workflow-node text with a themed orange selection highlight
 - Raw embedded metadata viewer and one-click copy actions
 - Ctrl-click multi-selection with group path-copy and Recycle Bin actions
-- A/B image comparison slider
+- A/B image comparison with wipe, difference map, and percentage overlay views
 - Explorer reveal, external open, and safe deletion through the Windows Recycle Bin
 - Persistent **80%–200% interface scaling** for 4K and high-DPI monitors
 - Switchable **Original** and **Acrylic Glass** themes with native Windows wallpaper blur

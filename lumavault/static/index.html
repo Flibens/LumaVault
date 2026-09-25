@@ -152,6 +152,18 @@
   <div class="compare-overlay hidden" id="compareOverlay" role="dialog" aria-modal="true">
     <header class="compare-head">
       <div><span class="eyebrow">A / B COMPARISON</span><strong id="compareTitle">Compare</strong></div>
+      <div class="compare-tools">
+        <div class="compare-mode-switch" role="group" aria-label="Comparison view">
+          <button class="active" data-compare-view="wipe" aria-pressed="true">Wipe</button>
+          <button data-compare-view="difference" aria-pressed="false">Difference</button>
+          <button data-compare-view="overlay" aria-pressed="false">Overlay</button>
+        </div>
+        <label class="compare-overlay-control hidden" id="compareOverlayControl" for="compareOverlayAmount">
+          <span>Overlay</span>
+          <input type="range" id="compareOverlayAmount" min="0" max="100" step="1" value="50" aria-label="A image overlay percentage">
+          <output id="compareOverlayValue" for="compareOverlayAmount">50%</output>
+        </label>
+      </div>
       <div class="compare-head-actions">
         <button class="glass-button" id="compareZoomOutBtn" title="Zoom out"><span data-icon="minus"></span></button>
         <button class="glass-button zoom-label" id="compareZoomResetBtn" title="Reset zoom">100%</button>
@@ -159,7 +171,7 @@
         <button class="glass-button" id="closeCompareOverlay" title="Close comparison"><span data-icon="close"></span></button>
       </div>
     </header>
-    <div class="compare-stage" id="compareStage">
+    <div class="compare-stage" id="compareStage" data-compare-mode="wipe">
       <img class="compare-back" id="compareBack" alt="Comparison B">
       <div class="compare-front-wrap" id="compareFrontWrap"><img class="compare-front" id="compareFront" alt="Comparison A"></div>
       <div class="compare-divider" id="compareDivider"><span><i></i><i></i></span></div>
