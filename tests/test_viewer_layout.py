@@ -306,10 +306,10 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn("isolation: isolate", glass_css)
 
     def test_readme_download_targets_latest_release_for_current_version(self):
-        self.assertIn('__version__ = "1.1.5"', PACKAGE_INIT)
+        self.assertIn('__version__ = "1.1.6"', PACKAGE_INIT)
         self.assertIn("https://github.com/Flibens/LumaVault/releases/latest", README)
-        self.assertIn("LumaVault-1.1.5-Windows.zip", README)
-        self.assertNotIn("LumaVault-1.1.2-Windows.zip", README)
+        self.assertIn("LumaVault-1.1.6-Windows.zip", README)
+        self.assertNotIn("LumaVault-1.1.5-Windows.zip", README)
 
     def test_windows_package_allows_pythonnet_from_downloaded_archives(self):
         config_path = ROOT / "assets" / "LumaVault.exe.config"
