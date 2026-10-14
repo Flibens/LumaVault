@@ -55,8 +55,9 @@ class ViewerLayoutContractTests(unittest.TestCase):
 
     def test_compare_pointer_math_respects_interface_scaling(self):
         self.assertIn("function comparePointerPosition(clientX, clientY)", JS)
-        self.assertIn("stage.clientWidth / rect.width", JS)
-        self.assertIn("stage.clientHeight / rect.height", JS)
+        # Bounding rect includes borders; offset dimensions avoid pointer-anchor drift.
+        self.assertIn("stage.offsetWidth / rect.width", JS)
+        self.assertIn("stage.offsetHeight / rect.height", JS)
         self.assertIn("position.x / stage.clientWidth * 100", JS)
         self.assertIn("ev.clientX - state.comparePanStart.x", JS)
         self.assertIn("* position.scaleX", JS)
@@ -306,9 +307,9 @@ class ViewerLayoutContractTests(unittest.TestCase):
         self.assertIn("isolation: isolate", glass_css)
 
     def test_readme_download_targets_latest_release_for_current_version(self):
-        self.assertIn('__version__ = "1.1.6"', PACKAGE_INIT)
+        self.assertIn('__version__ = "1.1.7"', PACKAGE_INIT)
         self.assertIn("https://github.com/Flibens/LumaVault/releases/latest", README)
-        self.assertIn("LumaVault-1.1.6-Windows.zip", README)
+        self.assertIn("LumaVault-1.1.7-Windows.zip", README)
         self.assertNotIn("LumaVault-1.1.5-Windows.zip", README)
 
     def test_windows_package_allows_pythonnet_from_downloaded_archives(self):

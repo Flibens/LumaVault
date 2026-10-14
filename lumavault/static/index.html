@@ -155,6 +155,7 @@
       <div class="compare-tools">
         <div class="compare-mode-switch" role="group" aria-label="Comparison view">
           <button class="active" data-compare-view="wipe" aria-pressed="true">Wipe</button>
+          <button data-compare-view="side-by-side" aria-pressed="false">Side by side</button>
           <button data-compare-view="difference" aria-pressed="false">Difference</button>
           <button data-compare-view="overlay" aria-pressed="false">Overlay</button>
         </div>
@@ -172,7 +173,7 @@
       </div>
     </header>
     <div class="compare-stage" id="compareStage" data-compare-mode="wipe">
-      <img class="compare-back" id="compareBack" alt="Comparison B">
+      <div class="compare-back-wrap" id="compareBackWrap"><img class="compare-back" id="compareBack" alt="Comparison B"></div>
       <div class="compare-front-wrap" id="compareFrontWrap"><img class="compare-front" id="compareFront" alt="Comparison A"></div>
       <div class="compare-divider" id="compareDivider"><span><i></i><i></i></span></div>
       <div class="compare-label label-a" id="compareLabelA">A</div>

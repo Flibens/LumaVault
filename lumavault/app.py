@@ -204,6 +204,7 @@ class VaultState:
         self.lock = threading.RLock()
         self._metadata_lock = threading.RLock()
         self._scan_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+        self._scan_generation = 0
         self.data = self._load_or_initialize(migrate_legacy)
         self._initialize_shared_browser_collections()
         self._metadata_index = self._load_metadata_index()
@@ -411,6 +412,7 @@ class VaultState:
 
     def clear_scan_cache(self) -> None:
         with self.lock:
+            self._scan_generation += 1
             self._scan_cache.clear()
 
     def sources(self) -> list[dict[str, Any]]:
@@ -517,7 +519,9 @@ class VaultState:
     def scan(self, source_filter: str = "all") -> list[dict[str, Any]]:
         self._sync_shared_browser_collections()
         favorites = set(self.data.get("favorites", []))
-        cached = self._scan_cache.get(source_filter)
+        with self.lock:
+            generation = self._scan_generation
+            cached = self._scan_cache.get(source_filter)
         if cached and time.monotonic() - cached[0] < 30:
             return [dict(row, is_favorite=self.favorite_key(row["source_id"], row["path"]) in favorites) for row in cached[1]]
 
@@ -554,12 +558,17 @@ class VaultState:
                         "size": stat.st_size,
                         "modified": stat.st_mtime,
                         "_modified_ns": stat.st_mtime_ns,
+                        "media_version": f"{stat.st_mtime_ns}-{stat.st_size}",
                         "kind": media_kind(path),
                         "is_favorite": False,
                     })
             except OSError:
                 continue
-        self._scan_cache[source_filter] = (time.monotonic(), rows)
+        with self.lock:
+            # A refresh/delete invalidates scans already in flight as well as
+            # completed entries. Never restore their pre-refresh snapshot.
+            if generation == self._scan_generation:
+                self._scan_cache[source_filter] = (time.monotonic(), rows)
         return [dict(row, is_favorite=self.favorite_key(row["source_id"], row["path"]) in favorites) for row in rows]
 
     @staticmethod

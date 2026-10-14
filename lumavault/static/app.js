@@ -160,7 +160,9 @@
 
   function mediaUrl(item, thumbnail = false) {
     return queryUrl(thumbnail ? "/api/thumb" : "/api/file", {
-      source: item.source_id, path: item.path, ...(thumbnail ? { width: 720 } : {})
+      source: item.source_id, path: item.path,
+      version: item.media_version || `${item.modified}-${item.size}`,
+      ...(thumbnail ? { width: 720 } : {})
     });
   }
 
@@ -511,7 +513,8 @@
       state.comparePanY = 0;
       return;
     }
-    const maxX = stage.clientWidth * (state.compareZoom - 1) / 2;
+    const width = stage.clientWidth / (state.compareViewMode === "side-by-side" ? 2 : 1);
+    const maxX = width * (state.compareZoom - 1) / 2;
     const maxY = stage.clientHeight * (state.compareZoom - 1) / 2;
     state.comparePanX = Math.max(-maxX, Math.min(maxX, state.comparePanX));
     state.comparePanY = Math.max(-maxY, Math.min(maxY, state.comparePanY));
@@ -534,11 +537,16 @@
   function comparePointerPosition(clientX, clientY) {
     const stage = $("#compareStage");
     const rect = stage.getBoundingClientRect();
-    const scaleX = rect.width ? stage.clientWidth / rect.width : 1;
-    const scaleY = rect.height ? stage.clientHeight / rect.height : 1;
+    const scaleX = rect.width ? stage.offsetWidth / rect.width : 1;
+    const scaleY = rect.height ? stage.offsetHeight / rect.height : 1;
+    // Use content coordinates (excluding the border), then map B to A's local pane.
+    let x = (clientX - rect.left) * scaleX - stage.clientLeft;
+    const width = stage.clientWidth / (state.compareViewMode === "side-by-side" ? 2 : 1);
+    if (state.compareViewMode === "side-by-side" && x >= width) x -= width;
     return {
-      x: (clientX - rect.left) * scaleX,
-      y: (clientY - rect.top) * scaleY,
+      x,
+      y: (clientY - rect.top) * scaleY - stage.clientTop,
+      width,
       scaleX, scaleY
     };
   }
@@ -549,7 +557,7 @@
     const stage = $("#compareStage");
     if (stage && next > 1 && clientX !== null && clientY !== null) {
       const position = comparePointerPosition(clientX, clientY);
-      const pointX = position.x - stage.clientWidth / 2;
+      const pointX = position.x - position.width / 2;
       const pointY = position.y - stage.clientHeight / 2;
       const worldX = (pointX - state.comparePanX) / previous;
       const worldY = (pointY - state.comparePanY) / previous;
@@ -574,9 +582,16 @@
     const front = $("#compareFront");
     const back = $("#compareBack");
     if (!stage || !front || !back) return;
+    const width = stage.clientWidth / (state.compareViewMode === "side-by-side" ? 2 : 1);
+    const height = stage.clientHeight;
+    // Keep the same normalized view when changing panes, viewport, or UI scale.
+    const previousWidth = parseFloat(front.style.width);
+    const previousHeight = parseFloat(front.style.height);
+    if (previousWidth > 0) state.comparePanX *= width / previousWidth;
+    if (previousHeight > 0) state.comparePanY *= height / previousHeight;
     [front, back].forEach(image => {
-      image.style.width = `${stage.clientWidth}px`;
-      image.style.height = `${stage.clientHeight}px`;
+      image.style.width = `${width}px`;
+      image.style.height = `${height}px`;
       image.style.maxWidth = "none";
       image.style.maxHeight = "none";
       image.style.left = "0";
@@ -589,12 +604,12 @@
   function updateCompareSlider(percent) {
     const value = Math.max(0, Math.min(100, percent));
     state.comparePosition = value;
-    $("#compareFrontWrap").style.width = state.compareViewMode === "wipe" ? `${value}%` : "100%";
+    $("#compareFrontWrap").style.width = state.compareViewMode === "wipe" ? `${value}%` : state.compareViewMode === "side-by-side" ? "50%" : "100%";
     $("#compareDivider").style.left = `${value}%`;
   }
 
   function setCompareViewMode(mode) {
-    const supported = new Set(["wipe", "difference", "overlay"]);
+    const supported = new Set(["wipe", "side-by-side", "difference", "overlay"]);
     const next = supported.has(mode) ? mode : "wipe";
     state.compareViewMode = next;
     const stage = $("#compareStage");
@@ -606,15 +621,17 @@
       button.setAttribute("aria-pressed", String(active));
     });
     $("#compareOverlayControl").classList.toggle("hidden", next !== "overlay");
-    $("#compareFrontWrap").style.width = next === "wipe" ? `${state.comparePosition}%` : "100%";
+    $("#compareFrontWrap").style.width = next === "wipe" ? `${state.comparePosition}%` : next === "side-by-side" ? "50%" : "100%";
     if (next === "overlay") front.style.opacity = String(state.compareAmount / 100);
     else front.style.opacity = "1";
     const hints = {
+      "side-by-side": "A left · B right · scroll either pane to zoom both · drag to pan both",
       wipe: "Scroll to zoom · drag image to pan · drag divider to compare",
       difference: "Difference map · black pixels match · color marks change",
       overlay: "Overlay A over B · adjust the A percentage above"
     };
     $(".compare-bottom-hint", stage).textContent = hints[next];
+    syncCompareGeometry();
   }
 
   function setCompareAmount(value) {
@@ -1268,6 +1285,11 @@
     const removedCount = state.items.filter(item => keys.has(`${item.source_id}:${item.path}`)).length;
     if (viewerItem && keys.has(`${viewerItem.source_id}:${viewerItem.path}`)) closeViewer();
     state.items = state.items.filter(item => !keys.has(`${item.source_id}:${item.path}`));
+    if (viewerItem && !keys.has(`${viewerItem.source_id}:${viewerItem.path}`)) {
+      state.viewerIndex = state.items.indexOf(viewerItem);
+      $("#viewerPrev").style.visibility = state.viewerIndex > 0 ? "visible" : "hidden";
+      $("#viewerNext").style.visibility = (state.viewerIndex < state.items.length - 1 || state.hasMore) ? "visible" : "hidden";
+    }
     state.compareItems = state.compareItems.filter(item => !keys.has(`${item.source_id}:${item.path}`));
     keys.forEach(key => state.selectedKeys.delete(key));
     state.total = Math.max(0, state.total - removedCount);
